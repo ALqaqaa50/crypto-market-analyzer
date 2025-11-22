@@ -12,12 +12,10 @@ from okx_stream_hunter.storage.neon_writer import NeonDBWriter
 
 class StreamEngine:
     """
-    High-level orchestration layer.
-
-    - Creates WebSocket client
-    - Wires messages into MarketProcessor
-    - Starts Supervisor for health monitoring
-    - Optionally integrates with NeonDBWriter for persistence
+    Coordinates:
+    - WebSocket client
+    - MarketProcessor
+    - Supervisor for health
     """
 
     def __init__(
@@ -28,13 +26,14 @@ class StreamEngine:
         ws_url: str = "wss://ws.okx.com:8443/ws/v5/public",
         db_writer: Optional[NeonDBWriter] = None,
     ) -> None:
+
         self.logger = logger or logging.getLogger(__name__)
 
         self.symbols = symbols or ["BTC-USDT-SWAP"]
-        self.channels = channels or ["trades", "books5"]
+        self.channels = channels or ["trades", "books5", "tickers"]
         self.ws_url = ws_url
 
-        # Core components
+        # Processor
         self.processor = MarketProcessor(
             logger=self.logger.getChild("processor"),
             db_writer=db_writer,
@@ -42,8 +41,10 @@ class StreamEngine:
             db_enable_orderbook=True,
         )
 
+        # Build subscription arguments
         subscriptions = self._build_subscriptions()
 
+        # WebSocket client
         self.ws_client = OKXWebSocketClient(
             url=self.ws_url,
             subscriptions=subscriptions,
@@ -51,10 +52,13 @@ class StreamEngine:
             logger=self.logger.getChild("ws"),
         )
 
+        # Supervisor يقلّم آخر رسالة وصلت من WebSocket مباشرة
         self.supervisor = StreamSupervisor(
-            get_last_update_ts=lambda: self.processor.last_update_ts,
+            get_last_update_ts=lambda: self.ws_client.last_message_ts,
             logger=self.logger.getChild("supervisor"),
             on_warning=self._handle_warning,
+            check_interval=5,
+            stale_after=25,   # تم تقليلها لأن ws_client يرسل ping/pong
         )
 
         self._tasks: List[asyncio.Task] = []
@@ -72,17 +76,23 @@ class StreamEngine:
     async def start(self) -> None:
         if self._running:
             return
-        self._running = True
 
+        self._running = True
         self.logger.info(
             f"Starting StreamEngine with symbols={self.symbols}, channels={self.channels}"
         )
 
+        # WebSocket task
         ws_task = asyncio.create_task(self.ws_client.start(), name="okx-ws-client")
         self._tasks.append(ws_task)
 
-        await self.supervisor.start()
+        # Supervisor task
+        sup_task = asyncio.create_task(self.supervisor.start(), name="stream-supervisor")
+        self._tasks.append(sup_task)
 
+        self.logger.info("StreamEngine started.")
+
+    # ------------------------------------------------------------------
     async def stop(self) -> None:
         if not self._running:
             return
@@ -105,8 +115,4 @@ class StreamEngine:
 
     # ------------------------------------------------------------------
     async def _handle_warning(self, message: str) -> None:
-        """
-        Called by supervisor when it detects a health issue.
-        In the future this can be connected to webhooks / n8n / alerts.
-        """
         self.logger.warning(f"[SUPERVISOR WARNING] {message}")
