@@ -2,183 +2,196 @@
 
 import asyncio
 import json
+import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import websockets
 from websockets import WebSocketClientProtocol
-from websockets.exceptions import ConnectionClosedOK, ConnectionClosedError
-
-from ..utils.logger import get_logger
-
-logger = get_logger(__name__)
 
 
-class WSClient:
+MessageHandler = Callable[[Dict[str, Any]], Awaitable[None]]
+
+
+class OKXWebSocketClient:
     """
-    Robust WebSocket client for OKX streaming.
+    Robust WebSocket client for OKX public streams.
 
-    Responsibilities:
-    - Maintain a single WS connection
-    - Auto-reconnect with backoff
-    - Handle ping / pong heartbeats
-    - Send subscriptions on (re)connect
-    - Push all messages into an asyncio.Queue
+    - Auto reconnect with exponential backoff
+    - Heartbeat (ping/pong) handling
+    - Graceful shutdown
+    - Simple subscribe/unsubscribe API
     """
 
     def __init__(
         self,
         url: str,
-        subscriptions: List[Dict[str, Any]],
-        *,
-        name: str = "okx-ws",
-        heartbeat_interval: int = 20,
-        reconnect_base_delay: float = 5.0,
-        reconnect_max_delay: float = 60.0,
-        max_queue_size: int = 10_000,
+        subscriptions: Optional[List[Dict[str, str]]] = None,
+        on_message: Optional[MessageHandler] = None,
+        logger: Optional[logging.Logger] = None,
+        max_retries: int = 0,
+        base_backoff: float = 1.0,
+        max_backoff: float = 30.0,
     ) -> None:
         self.url = url
-        self.subscriptions = subscriptions
-        self.name = name
-        self.heartbeat_interval = heartbeat_interval
-        self.reconnect_base_delay = reconnect_base_delay
-        self.reconnect_max_delay = reconnect_max_delay
+        self.subscriptions = subscriptions or []
+        self.on_message = on_message
+        self.logger = logger or logging.getLogger(__name__)
 
-        self._queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue(
-            maxsize=max_queue_size
-        )
         self._ws: Optional[WebSocketClientProtocol] = None
         self._running = False
-        self._task: Optional[asyncio.Task] = None
+        self._stopping = False
 
-    # -------------------- public API --------------------
+        self._max_retries = max_retries
+        self._base_backoff = base_backoff
+        self._max_backoff = max_backoff
+
+        self._last_message_ts: float = 0.0
+
+    # ------------------------------------------------------------------
+    # Properties
+    # ------------------------------------------------------------------
+    @property
+    def last_message_ts(self) -> float:
+        return self._last_message_ts
 
     @property
-    def queue(self) -> asyncio.Queue:
-        """Queue that will receive raw WS messages as dicts."""
-        return self._queue
+    def connected(self) -> bool:
+        return self._ws is not None and not self._ws.closed
 
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
     async def start(self) -> None:
-        """Start the client loop in background."""
+        """
+        Start the WebSocket client and keep it running
+        with automatic reconnects.
+        """
         if self._running:
             return
+
         self._running = True
-        self._task = asyncio.create_task(self._run(), name=f"{self.name}-loop")
-        logger.info("WSClient '%s' started", self.name)
+        self._stopping = False
+        attempt = 0
+
+        while not self._stopping:
+            try:
+                await self._connect_and_run()
+                attempt = 0  # reset on successful session
+            except asyncio.CancelledError:
+                self.logger.info("WebSocket client cancelled, stopping.")
+                break
+            except Exception as e:
+                self.logger.error(f"WebSocket error: {e}", exc_info=True)
+                attempt += 1
+
+                if 0 < self._max_retries < attempt:
+                    self.logger.error(
+                        "Max retries exceeded, stopping WebSocket client."
+                    )
+                    break
+
+                backoff = min(self._base_backoff * (2 ** (attempt - 1)), self._max_backoff)
+                self.logger.info(f"Reconnecting in {backoff:.1f} seconds...")
+                await asyncio.sleep(backoff)
+
+        self._running = False
+        await self._close()
 
     async def stop(self) -> None:
-        """Stop the client and close connection."""
-        self._running = False
-        if self._task:
-            self._task.cancel()
-        if self._ws:
-            try:
-                await self._ws.close()
-            except Exception:
-                pass
-        logger.info("WSClient '%s' stopped", self.name)
+        """Request graceful shutdown."""
+        self._stopping = True
+        await self._close()
 
-    # -------------------- internals --------------------
-
-    async def _run(self) -> None:
-        """Main reconnect loop."""
-        backoff = self.reconnect_base_delay
-
-        while self._running:
-            try:
-                await self._connect_and_stream()
-                # if we exit gracefully, reset backoff
-                backoff = self.reconnect_base_delay
-            except asyncio.CancelledError:
-                logger.info("WSClient '%s' loop cancelled", self.name)
-                break
-            except Exception as e:
-                logger.error("WSClient '%s' error: %s", self.name, e, exc_info=True)
-
-            if not self._running:
-                break
-
-            logger.warning(
-                "WSClient '%s' reconnecting in %.1f seconds", self.name, backoff
-            )
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, self.reconnect_max_delay)
-
-    async def _connect_and_stream(self) -> None:
-        """Connect to WS, subscribe, then read until connection closes."""
-        logger.info("WSClient '%s' connecting to %s", self.name, self.url)
-        async with websockets.connect(self.url, ping_interval=None) as ws:
-            self._ws = ws
-            logger.info("WSClient '%s' connected", self.name)
-
-            # send subscriptions
-            await self._send_subscriptions()
-
-            # start heartbeat + reader
-            reader = asyncio.create_task(self._reader_loop(), name=f"{self.name}-recv")
-            heartbeat = asyncio.create_task(
-                self._heartbeat_loop(), name=f"{self.name}-heartbeat"
-            )
-
-            done, pending = await asyncio.wait(
-                {reader, heartbeat},
-                return_when=asyncio.FIRST_EXCEPTION,
-            )
-
-            for task in pending:
-                task.cancel()
-
-            # check for exceptions
-            for task in done:
-                exc = task.exception()
-                if exc:
-                    raise exc
-
-    async def _send_subscriptions(self) -> None:
-        """Send all subscription payloads."""
-        if not self._ws:
+    async def subscribe(self, args: List[Dict[str, str]]) -> None:
+        """Send subscribe request (and remember it)."""
+        self.subscriptions.extend(args)
+        if not self.connected:
             return
 
-        for sub in self.subscriptions:
-            msg = json.dumps(sub)
-            await self._ws.send(msg)
-            logger.info("WSClient '%s' subscribed: %s", self.name, msg)
+        msg = {"op": "subscribe", "args": args}
+        await self._send(msg)
 
-    async def _heartbeat_loop(self) -> None:
-        """Send periodic ping frames to keep the connection alive."""
-        assert self._ws is not None
-        while self._running and self._ws.open:
+    async def unsubscribe(self, args: List[Dict[str, str]]) -> None:
+        """Send unsubscribe request."""
+        if not self.connected:
+            return
+        msg = {"op": "unsubscribe", "args": args}
+        await self._send(msg)
+
+    # ------------------------------------------------------------------
+    # Internal methods
+    # ------------------------------------------------------------------
+    async def _connect_and_run(self) -> None:
+        self.logger.info(f"Connecting to OKX WebSocket: {self.url}")
+        async with websockets.connect(self.url, ping_interval=20, ping_timeout=10) as ws:
+            self._ws = ws
+            self.logger.info("WebSocket connected.")
+
+            if self.subscriptions:
+                await self._subscribe_all()
+
+            async for raw in ws:
+                self._last_message_ts = time.time()
+
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    self.logger.warning(f"Failed to decode message: {raw!r}")
+                    continue
+
+                # OKX sends "event" messages for subscription, login, etc.
+                if "event" in data:
+                    self._handle_event(data)
+                    continue
+
+                if self.on_message:
+                    try:
+                        await self.on_message(data)
+                    except Exception as e:
+                        self.logger.error(
+                            f"Error in on_message handler: {e}", exc_info=True
+                        )
+
+    async def _subscribe_all(self) -> None:
+        if not self.subscriptions:
+            return
+        self.logger.info(f"Subscribing to {len(self.subscriptions)} streams.")
+        msg = {"op": "subscribe", "args": self.subscriptions}
+        await self._send(msg)
+
+    async def _send(self, msg: Dict[str, Any]) -> None:
+        if not self._ws or self._ws.closed:
+            self.logger.warning(f"Cannot send, websocket not connected: {msg}")
+            return
+        raw = json.dumps(msg)
+        await self._ws.send(raw)
+
+    async def _close(self) -> None:
+        if self._ws and not self._ws.closed:
             try:
-                ping_payload = json.dumps({"op": "ping", "ts": int(time.time() * 1000)})
-                await self._ws.send(ping_payload)
-                await asyncio.sleep(self.heartbeat_interval)
-            except (ConnectionClosedError, ConnectionClosedOK):
-                logger.warning("WSClient '%s' heartbeat connection closed", self.name)
-                break
-            except asyncio.CancelledError:
-                break
+                await self._ws.close()
+                self.logger.info("WebSocket connection closed.")
             except Exception as e:
-                logger.error("WSClient '%s' heartbeat error: %s", self.name, e)
-                break
+                self.logger.warning(f"Error while closing WebSocket: {e}")
+        self._ws = None
 
-    async def _reader_loop(self) -> None:
-        """Read messages from WS and push them into queue."""
-        assert self._ws is not None
-
-        async for raw in self._ws:
-            try:
-                msg = json.loads(raw)
-            except Exception:
-                logger.warning("WSClient '%s' invalid JSON: %s", self.name, raw)
-                continue
-
-            # skip pure pong
-            if isinstance(msg, dict) and msg.get("event") == "pong":
-                continue
-
-            try:
-                self._queue.put_nowait(msg)
-            except asyncio.QueueFull:
-                logger.error(
-                    "WSClient '%s' queue is full; dropping message", self.name
-                )
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+    def _handle_event(self, data: Dict[str, Any]) -> None:
+        """
+        Handle OKX event messages (subscribe, error, etc.).
+        Example:
+        {"event":"subscribe","arg":{"channel":"trades","instId":"BTC-USDT-SWAP"}}
+        """
+        event = data.get("event")
+        arg = data.get("arg") or data.get("args")
+        if event == "subscribe":
+            self.logger.info(f"Subscribed: {arg}")
+        elif event == "error":
+            code = data.get("code")
+            msg = data.get("msg")
+            self.logger.error(f"OKX WS error event: code={code}, msg={msg}")
+        else:
+            self.logger.debug(f"WS event: {data}")
