@@ -7,7 +7,7 @@ from typing import Awaitable, Callable, Optional
 
 try:
     import psutil  # type: ignore
-except Exception:  # pragma: no cover - psutil is optional
+except Exception:
     psutil = None  # type: ignore
 
 
@@ -17,11 +17,6 @@ HealthCallback = Callable[[str], Awaitable[None]]
 class StreamSupervisor:
     """
     Lightweight supervisor for monitoring stream health.
-
-    - Monitors:
-        * last market update timestamp
-        * process memory / cpu (if psutil available)
-    - Can trigger async callbacks when thresholds are violated.
     """
 
     def __init__(
@@ -45,7 +40,6 @@ class StreamSupervisor:
         self._running = False
         self._task: Optional[asyncio.Task] = None
 
-    # ------------------------------------------------------------------
     async def start(self) -> None:
         if self._running:
             return
@@ -62,7 +56,6 @@ class StreamSupervisor:
                 pass
             self._task = None
 
-    # ------------------------------------------------------------------
     async def _run(self) -> None:
         while self._running:
             try:
@@ -77,14 +70,24 @@ class StreamSupervisor:
     async def _check_once(self) -> None:
         now = time.time()
         last_ts = self.get_last_update_ts()
-        delta = now - last_ts if last_ts else None
 
-        if delta is None or delta > self.stale_after:
+        # FIX: delta must not be formatted if None
+        if not last_ts:
+            msg = "Market stream stale: no updates received yet."
+            self.logger.warning(msg)
+            if self.on_warning:
+                await self.on_warning(msg)
+            return
+
+        delta = now - last_ts
+
+        if delta > self.stale_after:
             msg = f"Market stream stale: last update {delta:.1f}s ago."
             self.logger.warning(msg)
             if self.on_warning:
                 await self.on_warning(msg)
 
+        # Optional system info checks
         if psutil is not None:
             p = psutil.Process()
             mem_mb = p.memory_info().rss / (1024 * 1024)
