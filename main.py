@@ -1,48 +1,79 @@
-"""
-Entry point for running the real-time OKX Stream Hunter engine.
-
-Usage (on your server, inside the venv):
-
-    python3 main.py
-
-Make sure you have:
-
-    - Installed requirements:  pip install -r requirements.txt
-    - Set NEON_DATABASE_URL (or disabled DB via enable_db=False)
-    - Optionally set OKX / Claude API keys in environment variables
-
-This script will:
-    - Load configuration
-    - Start StreamEngine
-    - Run until interrupted (Ctrl+C)
-"""
+# main.py
 
 import asyncio
+import logging
+import os
+from typing import Optional
 
-from okx_stream_hunter.config.loader import get_config
-from okx_stream_hunter.core.engine import StreamEngine
-from okx_stream_hunter.utils.logger import get_logger
-
-logger = get_logger(__name__)
+from okx_stream_hunter.config.loader import load_settings
+from okx_stream_hunter.core import StreamEngine
+from okx_stream_hunter.storage.neon_writer import NeonDBWriter
 
 
-async def _run(enable_db: bool = True) -> None:
-    cfg = get_config()
-    symbol = cfg.get("trading", "symbol", default="BTC-USDT-SWAP")
-    timeframes = cfg.get("trading", "timeframes", default=["1m", "5m", "15m"])
+async def create_db_writer_if_enabled(settings) -> Optional[NeonDBWriter]:
+    db_cfg = settings.database
+    if not db_cfg.enabled:
+        return None
 
-    engine = StreamEngine(symbol=symbol, timeframes=timeframes, enable_db=enable_db)
+    if not db_cfg.url:
+        logging.getLogger("main").warning(
+            "Database is enabled but URL is empty. Skipping DB writer initialization."
+        )
+        return None
+
+    logger = logging.getLogger("db")
+    writer = NeonDBWriter(
+        dsn=db_cfg.url,
+        min_size=db_cfg.pool_min_size,
+        max_size=db_cfg.pool_max_size,
+        logger=logger,
+    )
+    await writer.initialize()
+    return writer
+
+
+async def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
+    )
+
+    logger = logging.getLogger("main")
+    logger.info("Loading settings...")
+    settings = load_settings("config/settings.yaml")
+
+    # Ensure env expansion (NEON_DATABASE_URL etc.) via loader
+    if not settings.database.url:
+        # fallback to raw env if needed
+        env_url = os.getenv("NEON_DATABASE_URL", "")
+        if env_url:
+            settings.database.url = env_url
+
+    db_writer = await create_db_writer_if_enabled(settings)
+
+    engine_logger = logging.getLogger("stream")
+    engine = StreamEngine(
+        symbols=settings.okx.symbols,
+        channels=settings.okx.channels,
+        ws_url=settings.okx.public_ws,
+        logger=engine_logger,
+        db_writer=db_writer,
+    )
+
+    await engine.start()
+    logger.info("StreamEngine started.")
 
     try:
-        await engine.start()
+        while True:
+            await asyncio.sleep(1.0)
     except KeyboardInterrupt:
-        logger.info("Keyboard interrupt received – stopping engine...")
+        logger.info("KeyboardInterrupt received, shutting down...")
+    finally:
         await engine.stop()
-    except Exception as e:
-        logger.error("Fatal error in main loop: %s", e)
-        await engine.stop()
+        if db_writer:
+            await db_writer.close()
+        logger.info("Shutdown complete.")
 
 
 if __name__ == "__main__":
-    # If you want to run without DB while testing, set enable_db=False here.
-    asyncio.run(_run(enable_db=True))
+    asyncio.run(main())
