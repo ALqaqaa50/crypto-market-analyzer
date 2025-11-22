@@ -4,9 +4,10 @@ import asyncio
 import logging
 from typing import Dict, List, Optional
 
-from .processor import MarketProcessor
-from .supervisor import StreamSupervisor
-from .ws_client import OKXWebSocketClient
+from okx_stream_hunter.core.processor import MarketProcessor
+from okx_stream_hunter.core.supervisor import StreamSupervisor
+from okx_stream_hunter.core.ws_client import OKXWebSocketClient
+from okx_stream_hunter.storage.neon_writer import NeonDBWriter
 
 
 class StreamEngine:
@@ -16,7 +17,7 @@ class StreamEngine:
     - Creates WebSocket client
     - Wires messages into MarketProcessor
     - Starts Supervisor for health monitoring
-    - Provides simple start/stop API
+    - Optionally integrates with NeonDBWriter for persistence
     """
 
     def __init__(
@@ -25,16 +26,21 @@ class StreamEngine:
         channels: Optional[List[str]] = None,
         logger: Optional[logging.Logger] = None,
         ws_url: str = "wss://ws.okx.com:8443/ws/v5/public",
+        db_writer: Optional[NeonDBWriter] = None,
     ) -> None:
         self.logger = logger or logging.getLogger(__name__)
 
         self.symbols = symbols or ["BTC-USDT-SWAP"]
         self.channels = channels or ["trades", "books5"]
-
         self.ws_url = ws_url
 
         # Core components
-        self.processor = MarketProcessor(logger=self.logger.getChild("processor"))
+        self.processor = MarketProcessor(
+            logger=self.logger.getChild("processor"),
+            db_writer=db_writer,
+            db_enable_trades=True,
+            db_enable_orderbook=True,
+        )
 
         subscriptions = self._build_subscriptions()
 
@@ -72,11 +78,9 @@ class StreamEngine:
             f"Starting StreamEngine with symbols={self.symbols}, channels={self.channels}"
         )
 
-        # WebSocket run loop
         ws_task = asyncio.create_task(self.ws_client.start(), name="okx-ws-client")
         self._tasks.append(ws_task)
 
-        # Supervisor loop
         await self.supervisor.start()
 
     async def stop(self) -> None:
@@ -103,6 +107,6 @@ class StreamEngine:
     async def _handle_warning(self, message: str) -> None:
         """
         Called by supervisor when it detects a health issue.
-        في المستقبل يمكن أن نربطه بـ n8n / Webhook / Telegram...
+        In the future this can be connected to webhooks / n8n / alerts.
         """
         self.logger.warning(f"[SUPERVISOR WARNING] {message}")
