@@ -1,96 +1,97 @@
 # okx_stream_hunter/core/supervisor.py
 
 import asyncio
+import logging
 import time
-from typing import Any, Dict, List, Optional, Callable, Awaitable
+from typing import Awaitable, Callable, Optional
 
-from ..utils.logger import get_logger
-from .stream_manager import StreamEngine
+try:
+    import psutil  # type: ignore
+except Exception:  # pragma: no cover - psutil is optional
+    psutil = None  # type: ignore
 
-logger = get_logger(__name__)
+
+HealthCallback = Callable[[str], Awaitable[None]]
 
 
 class StreamSupervisor:
     """
-    Supervisor around StreamEngine.
+    Lightweight supervisor for monitoring stream health.
 
-    - Ensures the engine is running
-    - Restarts it on fatal failure with backoff
-    - Exposes hooks for health checks and notifications
+    - Monitors:
+        * last market update timestamp
+        * process memory / cpu (if psutil available)
+    - Can trigger async callbacks when thresholds are violated.
     """
 
     def __init__(
         self,
-        engine_factory: Callable[[], StreamEngine],
-        *,
-        name: str = "okx-stream-supervisor",
-        restart_base_delay: float = 5.0,
-        restart_max_delay: float = 120.0,
+        get_last_update_ts: Callable[[], float],
+        logger: Optional[logging.Logger] = None,
+        check_interval: float = 5.0,
+        stale_after: float = 30.0,
+        memory_warn_mb: float = 1500.0,
+        cpu_warn_percent: float = 90.0,
+        on_warning: Optional[HealthCallback] = None,
     ) -> None:
-        self.engine_factory = engine_factory
-        self.name = name
-        self.restart_base_delay = restart_base_delay
-        self.restart_max_delay = restart_max_delay
+        self.get_last_update_ts = get_last_update_ts
+        self.logger = logger or logging.getLogger(__name__)
+        self.check_interval = check_interval
+        self.stale_after = stale_after
+        self.memory_warn_mb = memory_warn_mb
+        self.cpu_warn_percent = cpu_warn_percent
+        self.on_warning = on_warning
 
-        self._engine: Optional[StreamEngine] = None
-        self._task: Optional[asyncio.Task] = None
         self._running = False
+        self._task: Optional[asyncio.Task] = None
 
-    @property
-    def engine(self) -> Optional[StreamEngine]:
-        return self._engine
-
-    # -------------------- lifecycle --------------------
-
+    # ------------------------------------------------------------------
     async def start(self) -> None:
         if self._running:
             return
         self._running = True
-        self._task = asyncio.create_task(self._run(), name=self.name)
-        logger.info("StreamSupervisor '%s' started", self.name)
+        self._task = asyncio.create_task(self._run(), name="stream-supervisor")
 
     async def stop(self) -> None:
         self._running = False
         if self._task:
             self._task.cancel()
-        if self._engine:
-            await self._engine.stop()
-        logger.info("StreamSupervisor '%s' stopped", self.name)
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
 
-    # -------------------- internals --------------------
-
+    # ------------------------------------------------------------------
     async def _run(self) -> None:
-        delay = self.restart_base_delay
-
         while self._running:
             try:
-                self._engine = self.engine_factory()
-                logger.info("StreamSupervisor '%s' starting engine", self.name)
-                await self._engine.start()
-
-                # Wait forever until cancelled or error
-                while self._running:
-                    await asyncio.sleep(5.0)
-
+                await self._check_once()
             except asyncio.CancelledError:
-                logger.info("StreamSupervisor '%s' cancelled", self.name)
                 break
             except Exception as e:
-                logger.error(
-                    "StreamSupervisor '%s' caught engine error: %s",
-                    self.name,
-                    e,
-                    exc_info=True,
-                )
+                self.logger.error(f"Supervisor error: {e}", exc_info=True)
 
-            # engine crashed or supervisor is stopping
-            if not self._running:
-                break
+            await asyncio.sleep(self.check_interval)
 
-            logger.warning(
-                "StreamSupervisor '%s' restarting engine in %.1f seconds",
-                self.name,
-                delay,
-            )
-            await asyncio.sleep(delay)
-            delay = min(delay * 2, self.restart_max_delay)
+    async def _check_once(self) -> None:
+        now = time.time()
+        last_ts = self.get_last_update_ts()
+        delta = now - last_ts if last_ts else None
+
+        if delta is None or delta > self.stale_after:
+            msg = f"Market stream stale: last update {delta:.1f}s ago."
+            self.logger.warning(msg)
+            if self.on_warning:
+                await self.on_warning(msg)
+
+        if psutil is not None:
+            p = psutil.Process()
+            mem_mb = p.memory_info().rss / (1024 * 1024)
+            cpu = p.cpu_percent(interval=0.0)
+
+            if mem_mb > self.memory_warn_mb or cpu > self.cpu_warn_percent:
+                msg = f"Resource warning: mem={mem_mb:.1f}MB, cpu={cpu:.1f}%"
+                self.logger.warning(msg)
+                if self.on_warning:
+                    await self.on_warning(msg)
