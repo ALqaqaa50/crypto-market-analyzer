@@ -1,7 +1,15 @@
 """
-Configuration loader with YAML + Environment variables support
+Simple configuration loader for okx_stream_hunter.
+
+- Loads YAML from config/settings.yaml
+- Supports ${ENV_VAR} placeholders
+- Exposes a tiny `.get(section, key, default)` API
+- Allows environment variables to override some values (DB + OKX + Claude)
 """
+from __future__ import annotations
+
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -9,139 +17,136 @@ import yaml
 
 from ..utils.logger import get_logger
 
-
 logger = get_logger(__name__)
+
+_ENV_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
 
 
 class ConfigLoader:
-    """Load and manage configuration from YAML + environment variables"""
-    
-    def __init__(self, config_path: Optional[str] = None):
-        """
-        Initialize config loader.
-        
-        Args:
-            config_path: Path to settings.yaml (auto-detected if None)
-        """
+    """Load and manage project configuration."""
+
+    def __init__(self, config_path: Optional[str] = None) -> None:
+        # Try to auto-detect settings.yaml if path not given
         if config_path is None:
-            # Auto-detect config file
-            possible_paths = [
+            candidates = [
                 Path("config/settings.yaml"),
                 Path("../config/settings.yaml"),
-                Path("/opt/okx_stream_hunter/config/settings.yaml"),
+                Path(__file__).resolve().parent.parent.parent / "config" / "settings.yaml",
             ]
-            
-            for path in possible_paths:
-                if path.exists():
-                    config_path = str(path)
+            for p in candidates:
+                if p.is_file():
+                    config_path = str(p)
                     break
-            
-            if config_path is None:
-                raise FileNotFoundError(
-                    "settings.yaml not found. Please create config/settings.yaml"
-                )
-        
-        self.config_path = config_path
-        self.config: Dict[str, Any] = {}
-        self.load()
-    
-    def load(self):
-        """Load configuration from YAML file"""
-        try:
-            with open(self.config_path, 'r') as f:
-                self.config = yaml.safe_load(f) or {}
-            logger.info(f"Loaded configuration from {self.config_path}")
-        except Exception as e:
-            logger.error(f"Failed to load config: {e}")
-            raise
-        
-        # Override with environment variables
+
+        self._path: Optional[Path] = Path(config_path) if config_path else None
+        self._data: Dict[str, Any] = {}
+
+        if self._path and self._path.is_file():
+            self._load()
+        else:
+            logger.warning("No config/settings.yaml found – using empty config")
+            self._data = {}
+
         self._apply_env_overrides()
-        
-        # Validate
-        self.validate()
-    
-    def _apply_env_overrides(self):
-        """Override config values with environment variables"""
-        
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def get(self, section: str, key: Optional[str] = None, default: Any = None) -> Any:
+        """Get a value from config.
+
+        Examples:
+            db_url = cfg.get("database", "url")
+            trading_cfg = cfg.get("trading")
+        """
+        section_data = self._data.get(section, {})
+        if key is None:
+            return section_data or default
+        return section_data.get(key, default)
+
+    def as_dict(self) -> Dict[str, Any]:
+        """Return full config as a dict."""
+        return dict(self._data)
+
+    def reload(self) -> None:
+        """Reload configuration from disk."""
+        if self._path and self._path.is_file():
+            self._load()
+            self._apply_env_overrides()
+        else:
+            logger.warning("Cannot reload – config file not found")
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def _load(self) -> None:
+        try:
+            text = self._path.read_text(encoding="utf-8")
+            raw = yaml.safe_load(text) or {}
+        except Exception as e:
+            logger.error("Failed to load config from %s: %s", self._path, e)
+            raw = {}
+
+        self._data = self._resolve_placeholders(raw)
+        logger.info("Configuration loaded from %s", self._path)
+
+    def _resolve_placeholders(self, value: Any) -> Any:
+        """Recursively replace ${VAR} with environment values."""
+        if isinstance(value, dict):
+            return {k: self._resolve_placeholders(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._resolve_placeholders(v) for v in value]
+        if isinstance(value, str):
+            # Entire string is a single placeholder
+            m = _ENV_PATTERN.fullmatch(value.strip())
+            if m:
+                return os.getenv(m.group(1), "")
+            # Replace inline occurrences
+            return _ENV_PATTERN.sub(lambda m: os.getenv(m.group(1), ""), value)
+        return value
+
+    def _apply_env_overrides(self) -> None:
+        """Let some environment variables override values from YAML."""
         # Database URL
-        if os.getenv("NEON_DATABASE_URL"):
-            self.config.setdefault("database", {})
-            self.config["database"]["url"] = os.getenv("NEON_DATABASE_URL")
-        
-        # Webhooks
-        if os.getenv("WEBHOOK_URL"):
-            self.config.setdefault("webhooks", {})
-            self.config["webhooks"]["snapshot_url"] = os.getenv("WEBHOOK_URL")
-        
-        if os.getenv("WEBHOOK_HEARTBEAT_URL"):
-            self.config.setdefault("webhooks", {})
-            self.config["webhooks"]["heartbeat_url"] = os.getenv("WEBHOOK_HEARTBEAT_URL")
-        
-        # Trading pair
-        if os.getenv("TRADING_PAIR"):
-            self.config.setdefault("trading", {})
-            self.config["trading"]["symbol"] = os.getenv("TRADING_PAIR")
-        
-        # Log level
-        if os.getenv("LOG_LEVEL"):
-            self.config.setdefault("logging", {})
-            self.config["logging"]["level"] = os.getenv("LOG_LEVEL")
-    
-    def validate(self):
-        """Validate required configuration"""
-        required = [
-            ("trading", "symbol"),
-            ("websocket", "url"),
-        ]
-        
-        for keys in required:
-            current = self.config
-            for key in keys:
-                if key not in current:
-                    raise ValueError(f"Missing required config: {'.'.join(keys)}")
-                current = current[key]
-        
-        logger.info("Configuration validated successfully")
-    
-    def get(self, *keys, default=None):
-        """
-        Get configuration value by nested keys.
-        
-        Example:
-            config.get("database", "pool_max_size")
-        """
-        current = self.config
-        for key in keys:
-            if isinstance(current, dict) and key in current:
-                current = current[key]
-            else:
-                return default
-        return current
-    
-    def __getitem__(self, key):
-        """Allow dict-like access"""
-        return self.config[key]
-    
-    def __contains__(self, key):
-        """Allow 'in' operator"""
-        return key in self.config
+        db_url = os.getenv("NEON_DATABASE_URL") or os.getenv("DATABASE_URL")
+        if db_url:
+            self._data.setdefault("database", {})["url"] = db_url
+
+        # OKX API credentials
+        okx_api_key = os.getenv("OKX_API_KEY")
+        okx_secret_key = os.getenv("OKX_SECRET_KEY")
+        okx_passphrase = os.getenv("OKX_PASSPHRASE")
+        if okx_api_key or okx_secret_key or okx_passphrase:
+            okx_cfg = self._data.setdefault("okx", {})
+            if okx_api_key:
+                okx_cfg["api_key"] = okx_api_key
+            if okx_secret_key:
+                okx_cfg["secret_key"] = okx_secret_key
+            if okx_passphrase:
+                okx_cfg["passphrase"] = okx_passphrase
+
+        # Claude API key
+        claude_key = os.getenv("CLAUDE_API_KEY")
+        if claude_key:
+            self._data.setdefault("claude", {})["api_key"] = claude_key
 
 
-# Global config instance
+# ----------------------------------------------------------------------
+# Module-level singleton helpers
+# ----------------------------------------------------------------------
 _config: Optional[ConfigLoader] = None
 
 
 def get_config() -> ConfigLoader:
-    """Get global configuration instance (singleton)"""
+    """Return global ConfigLoader singleton."""
     global _config
     if _config is None:
         _config = ConfigLoader()
     return _config
 
 
-def reload_config():
-    """Reload configuration from file"""
+def reload_config() -> ConfigLoader:
+    """Force reload configuration and return instance."""
     global _config
-    _config = None
-    return get_config()
+    _config = ConfigLoader()
+    return _config
