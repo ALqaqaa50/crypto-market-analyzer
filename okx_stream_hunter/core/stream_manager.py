@@ -1,98 +1,108 @@
 # okx_stream_hunter/core/stream_manager.py
 
 import asyncio
-from typing import Any, Dict, List, Optional
+import logging
+from typing import Dict, List, Optional
 
-from ..utils.logger import get_logger
-from .ws_client import WSClient
 from .processor import MarketProcessor
-
-logger = get_logger(__name__)
+from .supervisor import StreamSupervisor
+from .ws_client import OKXWebSocketClient
 
 
 class StreamEngine:
     """
-    High level streaming engine.
+    High-level orchestration layer.
 
-    - Owns a WSClient for OKX
-    - Owns a MarketProcessor for message normalization
-    - Exposes public queues: trades, candles, orderbook
+    - Creates WebSocket client
+    - Wires messages into MarketProcessor
+    - Starts Supervisor for health monitoring
+    - Provides simple start/stop API
     """
 
     def __init__(
         self,
-        *,
-        url: str,
-        subscriptions: List[Dict[str, Any]],
-        name: str = "okx-stream-engine",
+        symbols: Optional[List[str]] = None,
+        channels: Optional[List[str]] = None,
+        logger: Optional[logging.Logger] = None,
+        ws_url: str = "wss://ws.okx.com:8443/ws/v5/public",
     ) -> None:
-        # raw messages from WS
-        self.raw_queue: asyncio.Queue = asyncio.Queue(maxsize=20_000)
+        self.logger = logger or logging.getLogger(__name__)
 
-        # core components
-        self.ws_client = WSClient(
-            url=url,
+        self.symbols = symbols or ["BTC-USDT-SWAP"]
+        self.channels = channels or ["trades", "books5"]
+
+        self.ws_url = ws_url
+
+        # Core components
+        self.processor = MarketProcessor(logger=self.logger.getChild("processor"))
+
+        subscriptions = self._build_subscriptions()
+
+        self.ws_client = OKXWebSocketClient(
+            url=self.ws_url,
             subscriptions=subscriptions,
-            name=name + "-ws",
-            max_queue_size=20_000,
+            on_message=self.processor.handle_message,
+            logger=self.logger.getChild("ws"),
         )
-        # wire ws_client queue to our raw_queue
-        self.ws_client._queue = self.raw_queue  # internal wiring, same queue object
 
-        self.processor = MarketProcessor(self.raw_queue)
+        self.supervisor = StreamSupervisor(
+            get_last_update_ts=lambda: self.processor.last_update_ts,
+            logger=self.logger.getChild("supervisor"),
+            on_warning=self._handle_warning,
+        )
 
-        self.name = name
+        self._tasks: List[asyncio.Task] = []
         self._running = False
 
-    # Convenience properties to access processed queues
-    @property
-    def trades_queue(self) -> asyncio.Queue:
-        return self.processor.trades_queue
+    # ------------------------------------------------------------------
+    def _build_subscriptions(self) -> List[Dict[str, str]]:
+        args: List[Dict[str, str]] = []
+        for inst in self.symbols:
+            for ch in self.channels:
+                args.append({"channel": ch, "instId": inst})
+        return args
 
-    @property
-    def candles_queue(self) -> asyncio.Queue:
-        return self.processor.candles_queue
-
-    @property
-    def orderbook_queue(self) -> asyncio.Queue:
-        return self.processor.orderbook_queue
-
-    # -------------------- lifecycle --------------------
-
+    # ------------------------------------------------------------------
     async def start(self) -> None:
-        """Start WS client + processor."""
         if self._running:
             return
         self._running = True
-        await self.ws_client.start()
-        await self.processor.start()
-        logger.info("StreamEngine '%s' started", self.name)
+
+        self.logger.info(
+            f"Starting StreamEngine with symbols={self.symbols}, channels={self.channels}"
+        )
+
+        # WebSocket run loop
+        ws_task = asyncio.create_task(self.ws_client.start(), name="okx-ws-client")
+        self._tasks.append(ws_task)
+
+        # Supervisor loop
+        await self.supervisor.start()
 
     async def stop(self) -> None:
-        """Stop all components."""
+        if not self._running:
+            return
         self._running = False
-        await self.processor.stop()
+
+        self.logger.info("Stopping StreamEngine...")
+
         await self.ws_client.stop()
-        logger.info("StreamEngine '%s' stopped", self.name)
+        await self.supervisor.stop()
 
-    # -------------------- helper methods --------------------
+        for t in self._tasks:
+            t.cancel()
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
 
-    async def drain_once(self) -> Dict[str, int]:
+        self._tasks.clear()
+        self.logger.info("StreamEngine stopped.")
+
+    # ------------------------------------------------------------------
+    async def _handle_warning(self, message: str) -> None:
         """
-        Utility to drain queues once for debugging / testing.
-
-        Returns simple stats dict with number of items consumed from each queue.
+        Called by supervisor when it detects a health issue.
+        في المستقبل يمكن أن نربطه بـ n8n / Webhook / Telegram...
         """
-        stats = {"trades": 0, "candles": 0, "orderbook": 0}
-
-        while not self.trades_queue.empty():
-            _ = await self.trades_queue.get()
-            stats["trades"] += 1
-        while not self.candles_queue.empty():
-            _ = await self.candles_queue.get()
-            stats["candles"] += 1
-        while not self.orderbook_queue.empty():
-            _ = await self.orderbook_queue.get()
-            stats["orderbook"] += 1
-
-        return stats
+        self.logger.warning(f"[SUPERVISOR WARNING] {message}")
