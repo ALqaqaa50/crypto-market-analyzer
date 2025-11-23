@@ -159,3 +159,14 @@ performance:
   max_queue_size: 10000
   max_candles_in_memory: 5000
   process_pool_size: 4
+  trading:
+  enabled: true              # نفعّل الأوتو-تريد
+  symbol: "BTC-USDT-SWAP"    # عقد OKX
+  td_mode: "cross"           # أو "isolated" لو حاب
+  leverage: 5                # رافعة مبدئية
+  base_size: 1               # حجم العقد (كم عقد SWAP)
+  min_conf: 0.25             # أقل ثقة عشان يفتح صفقة
+  flip_conf: 0.55            # لو الإشارة عكس الصفقة وبثقة أعلى من هذا → يعكس
+  take_profit_mult: 1.5      # مضروب في ATR أو متوسط الحركة (هنضيفها لاحقاً)
+  stop_loss_mult: 1.0        # نفس الفكرة
+  max_open_minutes: 60       # يغلق الصفقة لو طالت زيادة
