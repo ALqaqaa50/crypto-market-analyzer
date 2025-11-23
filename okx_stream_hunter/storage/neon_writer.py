@@ -10,7 +10,7 @@ except ImportError:
     asyncpg = None
 
 from ..utils.logger import get_logger
-from ..config.loader import get_settings
+from ..config.loader import load_settings
 
 logger = get_logger(__name__)
 
@@ -24,7 +24,7 @@ class NeonWriter:
         if asyncpg is None:
             raise ImportError("asyncpg is required. Install it first.")
 
-        cfg = get_settings()
+        cfg = load_settings()
         db_cfg = cfg.database
 
         self.db_url = db_cfg.url

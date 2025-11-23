@@ -71,7 +71,7 @@ async def create_db_writer_if_enabled(settings) -> Optional[NeonDBWriter]:
 
     writer_logger = logging.getLogger("neon-writer")
     writer = NeonDBWriter()
-    # NeonDBWriter internally reads get_settings(), لكن لا مشكلة:
+    # NeonDBWriter internally reads load_settings(), لكن لا مشكلة:
     # هو يستخدم نفس settings / env.
     await writer.connect()
     writer_logger.info("NeonDBWriter connected and ready.")
@@ -271,8 +271,8 @@ async def main() -> None:
     setup_logging()
     logger = logging.getLogger("main")
 
-    logger.info("Loading settings via get_settings() ...")
-    settings = get_settings()
+    logger.info("Loading settings via load_settings() ...")
+    settings = load_settings()
 
     # ----------------------------------------------
     # Database writer (Neon)
