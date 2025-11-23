@@ -24,7 +24,7 @@ except Exception:  # pragma: no cover
     asyncpg = None
 
 # --- Local imports from the package ---
-from okx_stream_hunter.config.loader import get_settings
+from okx_stream_hunter.config.loader import load_settings
 from okx_stream_hunter.core import StreamEngine
 from okx_stream_hunter.storage.neon_writer import NeonDBWriter
 
