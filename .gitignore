@@ -141,3 +141,7 @@ logs/
 data/
 backtest_results/
 performance_reports/
+project_env/
+__pycache__/
+.env
+venv/
