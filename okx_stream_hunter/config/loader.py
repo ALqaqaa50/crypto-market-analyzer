@@ -12,6 +12,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any, Dict, Optional
+from types import SimpleNamespace
 
 import yaml
 
@@ -67,6 +68,23 @@ class ConfigLoader:
     def as_dict(self) -> Dict[str, Any]:
         """Return full config as a dict."""
         return dict(self._data)
+
+    # ------------------------------------------------------------------
+    # Attribute access compatibility
+    # ------------------------------------------------------------------
+    def _to_obj(self, value: Any) -> Any:
+        """Recursively convert dicts to objects with attribute access."""
+        if isinstance(value, dict):
+            return SimpleNamespace(**{k: self._to_obj(v) for k, v in value.items()})
+        if isinstance(value, list):
+            return [self._to_obj(v) for v in value]
+        return value
+
+    def __getattr__(self, name: str) -> Any:
+        """Allow `settings.section` style access for top-level sections."""
+        if name in self._data:
+            return self._to_obj(self._data[name])
+        raise AttributeError(f"ConfigLoader has no attribute '{name}'")
 
     def reload(self) -> None:
         """Reload configuration from disk."""
