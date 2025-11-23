@@ -70,7 +70,7 @@ class MarketState:
     ask_volume: Optional[float] = None
     spread: Optional[float] = None
 
-    last_book_levels: Optional[Dict[str, float]] = None  # for spoofing check
+    last_book_levels: Optional[Dict[str, Dict[str, float]]] = None  # for spoofing check
 
 
 class AIBrain:
@@ -86,19 +86,21 @@ class AIBrain:
       - Emit trading signal: direction + confidence + explanation.
     """
 
-    def __init__(self, symbol: str, config: Optional[BrainConfig] = None,
-                 logger: Optional[logging.Logger] = None) -> None:
+    def __init__(
+        self,
+        symbol: str,
+        config: Optional[BrainConfig] = None,
+        logger: Optional[logging.Logger] = None,
+    ) -> None:
         self.symbol = symbol
         self.config = config or BrainConfig()
         self.state = MarketState()
 
         self.log = logger or logging.getLogger("ai_brain")
-
-        # cache of last computed signal
         self._last_signal: Optional[Signal] = None
 
     # ------------------------------------------------------------------
-    # Public API – called by stream manager
+    # Public API – called by stream manager / AI loop
     # ------------------------------------------------------------------
     def update_from_ticker(self, ticker: Dict) -> None:
         """
@@ -116,13 +118,16 @@ class AIBrain:
             return
 
         ts_raw = ticker.get("ts") or ticker.get("timestamp") or time.time() * 1000
-        ts = float(ts_raw) / 1000.0
+        try:
+            ts = float(ts_raw) / 1000.0
+        except (TypeError, ValueError):
+            ts = time.time()
 
         self._update_price_series(price, ts)
 
     def update_from_trades(self, trades: List[Dict]) -> None:
         """
-        trades: list of trade objects from OKX stream.
+        trades: list of trade objects from OKX stream or DB.
         We only aggregate buy/sell volume per window.
         """
         if not trades:
@@ -169,15 +174,16 @@ class AIBrain:
         except (TypeError, ValueError):
             bid_vol = ask_vol = None
 
-        self.state.best_bid = best_bid
-        self.state.best_ask = best_ask
-        self.state.bid_volume = bid_vol
-        self.state.ask_volume = ask_vol
+        st = self.state
+        st.best_bid = best_bid
+        st.best_ask = best_ask
+        st.bid_volume = bid_vol
+        st.ask_volume = ask_vol
 
         if best_bid and best_ask and best_ask > 0:
-            self.state.spread = (best_ask - best_bid) / best_ask
+            st.spread = (best_ask - best_bid) / best_ask
         else:
-            self.state.spread = None
+            st.spread = None
 
         levels_data = snapshot.get("levels_data")
         if isinstance(levels_data, dict):
@@ -185,22 +191,20 @@ class AIBrain:
 
     def update_from_indicator(self, indicator: Dict) -> None:
         """
-        Optional: takes precomputed indicators from another module.
-        We lightly use RSI + MACD-style momentum if available.
+        Optional: attach precomputed indicators (RSI/MACD...) if needed.
+        For now, just store them; can be used later to boost scores.
         """
-        # Attach to state via temporary attributes
         self.state.indicator = indicator  # type: ignore[attr-defined]
 
     def build_signal(self) -> Signal:
         """
         Build trading signal based on current state.
-        Does not modify internal state except caching last signal.
         """
         now = time.time()
         st = self.state
         cfg = self.config
 
-        # If no price data yet → stay flat
+        # No price yet
         if not st.last_price or not st.last_ts:
             sig: Signal = {
                 "direction": "flat",
@@ -214,7 +218,7 @@ class AIBrain:
             self._last_signal = sig
             return sig
 
-        # If data is stale → flat
+        # Stale market
         if now - st.last_ts > cfg.max_age_seconds:
             sig = {
                 "direction": "flat",
@@ -228,19 +232,17 @@ class AIBrain:
             self._last_signal = sig
             return sig
 
-        # Compute features
         vol = self._estimate_volatility()
         trend_score, regime = self._trend_score(vol)
         of_score = self._orderflow_score()
-        ob_score, wall_info = self._orderbook_score()
+        ob_score, _ = self._orderbook_score()
         spoof_score = self._spoofing_score()
 
-        # Combine scores
         long_score = 0.0
         short_score = 0.0
         neutral_score = 0.0
 
-        # Trend contribution
+        # Trend
         if trend_score > 0:
             long_score += trend_score
         elif trend_score < 0:
@@ -260,14 +262,12 @@ class AIBrain:
         elif ob_score < 0:
             short_score += -0.6 * ob_score
 
-        # Spoofing acts as risk / anti-confidence
+        # Risk penalties
         risk_penalty = max(0.0, spoof_score)
-
-        # If volatility is extremely high, reduce conviction
         if vol is not None and vol > cfg.high_volatility_thr * 3:
             risk_penalty += 0.3
 
-        # Final direction
+        # Direction decision
         if long_score > short_score and long_score > neutral_score:
             direction: Direction = "long"
             raw_conf = long_score - risk_penalty
@@ -278,16 +278,15 @@ class AIBrain:
             direction = "flat"
             raw_conf = neutral_score - risk_penalty
 
-        # Convert raw score to bounded confidence (0–1)
         confidence = self._score_to_confidence(raw_conf)
 
         reason_parts: List[str] = []
         if regime != "range":
             reason_parts.append(f"regime={regime}")
         if abs(of_score) > 0.15:
-            reason_parts.append(f"orderflow={'buy' if of_score>0 else 'sell'}")
+            reason_parts.append(f"orderflow={'buy' if of_score > 0 else 'sell'}")
         if abs(ob_score) > 0.15:
-            reason_parts.append(f"orderbook={'bid' if ob_score>0 else 'ask'}")
+            reason_parts.append(f"orderbook={'bid' if ob_score > 0 else 'ask'}")
         if spoof_score > 0.1:
             reason_parts.append("spoof_risk")
         if vol is not None:
@@ -303,17 +302,16 @@ class AIBrain:
             "risk_penalty": risk_penalty,
         }
 
-        sig = Signal(
-            direction=direction,
-            confidence=max(0.0, min(1.0, confidence)),
-            reason=reason,
-            price=st.last_price,
-            timestamp=now,
-            regime=regime,
-            scores=scores,
-        )
+        sig: Signal = {
+            "direction": direction,
+            "confidence": max(0.0, min(1.0, confidence)),
+            "reason": reason,
+            "price": st.last_price,
+            "timestamp": now,
+            "regime": regime,
+            "scores": scores,
+        }
 
-        # Enforce minimum confidence – otherwise flat
         if sig["confidence"] < cfg.min_confidence:
             sig["direction"] = "flat"
             sig["reason"] = "low_confidence;" + reason
@@ -341,7 +339,6 @@ class AIBrain:
             st.prices.popleft()
             st.timestamps.popleft()
 
-        # EMA updates
         st.ema_fast = self._ema_update(st.ema_fast, price, cfg.ema_fast_span)
         st.ema_slow = self._ema_update(st.ema_slow, price, cfg.ema_slow_span)
 
@@ -380,7 +377,6 @@ class AIBrain:
         if len(returns) < 3:
             return None
 
-        # Use last N returns window
         window = returns[-cfg.volatility_window :]
         mean = sum(window) / len(window)
         var = sum((r - mean) ** 2 for r in window) / max(1, len(window) - 1)
@@ -396,8 +392,7 @@ class AIBrain:
         gap = (st.ema_fast - st.ema_slow) / st.ema_slow
 
         if abs(gap) < cfg.trend_strength_thr:
-            regime = "range"
-            return 0.0, regime
+            return 0.0, "range"
 
         if volatility is not None and volatility < cfg.high_volatility_thr:
             vol_boost = 1.2
@@ -423,7 +418,6 @@ class AIBrain:
             return 0.0
 
         imbalance = (total_buy - total_sell) / total
-        # clamp
         imbalance = max(-1.0, min(1.0, imbalance))
         return float(imbalance)
 
@@ -447,21 +441,12 @@ class AIBrain:
             "spread": st.spread or 0.0,
         }
 
-        # Slight penalty if spread is wide
         if st.spread and st.spread > cfg.spread_widen_thr:
-            if imbalance > 0:
-                imbalance *= 0.8
-            else:
-                imbalance *= 0.8
+            imbalance *= 0.8
 
         return float(imbalance), info
 
-    def _detect_spoofing(self, levels: Dict[str, float]) -> None:
-        """
-        Very simple spoofing heuristic: if a single level is much larger
-        than historical average and close to price, we treat it as potential spoof.
-        We only store last levels and compute score later.
-        """
+    def _detect_spoofing(self, levels: Dict[str, Dict[str, float]]) -> None:
         self.state.last_book_levels = levels
 
     def _spoofing_score(self) -> float:
@@ -472,8 +457,11 @@ class AIBrain:
         if not levels or not st.last_price:
             return 0.0
 
-        bids = {float(k): float(v) for k, v in levels.get("bids", {}).items()} if "bids" in levels else {}
-        asks = {float(k): float(v) for k, v in levels.get("asks", {}).items()} if "asks" in levels else {}
+        bids_raw = levels.get("bids", {})
+        asks_raw = levels.get("asks", {})
+
+        bids = {float(k): float(v) for k, v in bids_raw.items()}
+        asks = {float(k): float(v) for k, v in asks_raw.items()}
 
         all_vols: List[float] = list(bids.values()) + list(asks.values())
         if len(all_vols) < 4:
@@ -493,19 +481,15 @@ class AIBrain:
 
         spoof_score = 0.0
 
-        if max_bid_vol / avg > cfg.spoof_ratio_thr:
-            # closer to price = more suspicious
-            if st.last_price > 0:
-                dist = abs(st.last_price - max_bid_price) / st.last_price
-                spoof_score += max(0.0, 1.0 - dist * 50)
+        if max_bid_vol / avg > cfg.spoof_ratio_thr and st.last_price > 0:
+            dist = abs(st.last_price - max_bid_price) / st.last_price
+            spoof_score += max(0.0, 1.0 - dist * 50)
 
-        if max_ask_vol / avg > cfg.spoof_ratio_thr:
-            if st.last_price > 0:
-                dist = abs(st.last_price - min_ask_price) / st.last_price
-                spoof_score += max(0.0, 1.0 - dist * 50)
+        if max_ask_vol / avg > cfg.spoof_ratio_thr and st.last_price > 0:
+            dist = abs(st.last_price - min_ask_price) / st.last_price
+            spoof_score += max(0.0, 1.0 - dist * 50)
 
         return float(max(0.0, min(1.5, spoof_score)))
 
     def _score_to_confidence(self, raw: float) -> float:
-        # squash using logistic-like function
         return 1.0 / (1.0 + math.exp(-raw * 2.0))
