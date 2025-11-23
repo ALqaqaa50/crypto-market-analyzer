@@ -162,3 +162,12 @@ def get_settings() -> ConfigLoader:
     Returns the `ConfigLoader` singleton.
     """
     return get_config()
+
+
+# Backwards-compatible alias used in older code
+def load_settings() -> ConfigLoader:
+    """
+    Alias for `get_config()` / `get_settings()` kept for older modules
+    that import `load_settings`.
+    """
+    return get_config()
