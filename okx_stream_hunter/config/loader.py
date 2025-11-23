@@ -150,3 +150,15 @@ def reload_config() -> ConfigLoader:
     global _config
     _config = ConfigLoader()
     return _config
+
+
+# ============================
+# Compatibility Helper
+# ============================
+def get_settings() -> ConfigLoader:
+    """
+    Backward-compatible alias for `get_config()` so older modules keep working.
+
+    Returns the `ConfigLoader` singleton.
+    """
+    return get_config()
