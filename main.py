@@ -27,6 +27,7 @@ except Exception:  # pragma: no cover
 from okx_stream_hunter.config.loader import get_settings
 from okx_stream_hunter.core import StreamEngine
 from okx_stream_hunter.storage.neon_writer import NeonDBWriter
+from okx_stream_hunter.ai.brain import AIBrain
 
 
 # ============================================================
@@ -320,7 +321,17 @@ async def main() -> None:
     tasks.append(asyncio.create_task(health_monitor_task(db_pool)))
 
     # AI Brain
-    tasks.append(asyncio.create_task(ai_brain_loop(db_pool, db_writer)))
+    ai_mode = os.getenv("AI_BRAIN_MODE", "limited").lower()
+    if ai_mode == "full":
+        # Run full AI brain (requires db_pool and writer for full functionality)
+        if db_writer is None and db_pool is None:
+            logger.warning("Requested full AI mode but DB/writer not available → falling back to limited mode")
+            tasks.append(asyncio.create_task(ai_brain_loop(db_pool, db_writer)))
+        else:
+            ai = AIBrain(db_pool, db_writer, symbol=(settings.okx.symbols[0] if hasattr(settings.okx, "symbols") and settings.okx.symbols else "BTC-USDT-SWAP"))
+            tasks.append(asyncio.create_task(ai.run()))
+    else:
+        tasks.append(asyncio.create_task(ai_brain_loop(db_pool, db_writer)))
 
     # Dashboard (optional, can be disabled via env)
     if os.getenv("ENABLE_DASHBOARD", "1") == "1":
