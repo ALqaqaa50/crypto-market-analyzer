@@ -27,14 +27,29 @@ trading:
 # WebSocket Configuration
 websocket:
   url: "wss://ws.okx.com:8443/ws/v5/public"
+
+# OKX compatibility (used by package code expecting `okx`)
+okx:
+  public_ws: "wss://ws.okx.com:8443/ws/v5/public"
+  symbols:
+    - "BTC-USDT-SWAP"
+  channels:
+    - "trades"
+    - "books5"
+    - "tickers"
   ping_interval: 20
   ping_timeout: 20
   reconnect_delay: 3
   max_reconnect_attempts: 999999
+  sandbox: true
+  api_key: "${OKX_API_KEY}"
+  secret_key: "${OKX_SECRET_KEY}"
+  passphrase: "${OKX_PASSPHRASE}"
 
 # Database Configuration
 database:
   # Set via environment variable: NEON_DATABASE_URL
+  enabled: true
   pool_min_size: 2
   pool_max_size: 10
   command_timeout: 60
