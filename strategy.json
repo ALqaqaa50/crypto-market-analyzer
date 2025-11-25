@@ -1,0 +1,9 @@
+{
+  "signal": "SELL",
+  "direction": "short",
+  "entry_price": 87550.5,
+  "tp": 87025.197,
+  "sl": 87813.15149999999,
+  "confidence": 36.5,
+  "generated_at": "2025-11-25T12:45:31.187224+00:00"
+}

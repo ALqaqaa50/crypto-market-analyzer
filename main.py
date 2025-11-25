@@ -18,7 +18,10 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
-from typing import List, Optional, Literal, Dict, Any
+from typing import List, Optional, Literal, Dict, Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import asyncpg
 
 try:
     import asyncpg  # type: ignore
@@ -29,6 +32,8 @@ from okx_stream_hunter.config.loader import get_settings
 from okx_stream_hunter.core import StreamEngine
 from okx_stream_hunter.storage.neon_writer import NeonDBWriter
 from okx_stream_hunter.core.ai_brain import AIBrain
+from okx_stream_hunter.state import get_system_state
+from okx_stream_hunter.core.trade_safety import TradeSafety, SafetyConfig
 
 
 # ============================================================
@@ -78,7 +83,7 @@ async def create_db_writer_if_enabled(settings) -> Optional[NeonDBWriter]:
 # ============================================================
 
 async def health_monitor_task(
-    db_pool: Optional["asyncpg.Pool"],
+    db_pool: Optional[Any],
     interval_sec: int = 60,
 ) -> None:
     logger = logging.getLogger("health-monitor")
@@ -123,24 +128,56 @@ Direction = Literal["long", "short", "flat"]
 
 async def ai_brain_ultra_loop(
     symbol: str,
-    db_pool: Optional["asyncpg.Pool"],
+    db_pool: Optional[Any],
     writer: Optional[NeonDBWriter],
+    brain: AIBrain,  # 🔥 استقبال brain من main بدل إنشائه من جديد
     interval_sec: int = 15,
 ) -> None:
     """
     ULTRA AI LOOP:
-      - يقرأ آخر البيانات من Neon (شموع + صفقات + orderbook)
-      - يغذي AIBrain بالبيانات (price + trades + orderbook)
-      - يبني إشارة تداول متقدمة (اتجاه + ثقة + تفسير)
-      - يكتب:
-          * insights.json  → للـ Dashboard (/api/ai/insights)
-          * strategy.json  → (/api/strategy) مع TP/SL مقترح
-          * market_events  → داخل Neon (AI_SIGNAL / AUTO_TRADE_OPEN / CLOSE)
-      - يدير مركز واحد بسيط (paper auto-trade) في الذاكرة.
+      - AI Brain يستقبل البيانات في الوقت الحقيقي من StreamEngine
+      - هذه الحلقة تبني الإشارة وتكتب insights/strategy JSON
+      - وتدير التداول الورقي (paper trading)
+      - وتحدث system_state للـ Dashboard
     """
     logger = logging.getLogger("ai-ultra")
+    
+    # Get global system state
+    system_state = get_system_state()
 
-    brain = AIBrain(symbol=symbol, logger=logger)
+    # ============================================================
+    # 🛡️ TRADE SAFETY SYSTEM - Conservative Production Settings
+    # ============================================================
+    trade_safety = TradeSafety(SafetyConfig(
+        # Regime-specific confidence thresholds
+        min_confidence=0.70,  # Base: 70%
+        min_confidence_trending=0.65,  # Trending: 65%
+        min_confidence_ranging=0.75,  # Ranging: 75%
+        min_confidence_volatile=0.80,  # Volatile: 80%
+        
+        # Spoof and risk filters
+        max_spoof_score=0.40,  # Reject if spoof > 40%
+        max_risk_penalty=0.70,  # Reject if risk > 70%
+        
+        # Time-based protections
+        min_trade_interval_seconds=300,  # 5 min between any trades
+        min_same_direction_interval_seconds=600,  # 10 min for same direction
+        
+        # Rate limits
+        max_trades_per_hour=3,  # Conservative: 3 trades/hour
+        max_trades_per_day=15,  # Max 15 trades/day
+        max_flips_per_hour=2,   # Max 2 position flips/hour
+        
+        # Loss protection
+        max_daily_loss_pct=0.04,  # Stop at 4% daily loss
+        max_consecutive_losses=3,       # Stop after 3 losses in a row
+        emergency_stop_loss_pct=0.08,  # Emergency stop at 8% total loss
+        
+        # Signal validation
+        signal_max_age_seconds=5,  # Reject stale signals
+        duplicate_signal_window_seconds=30,  # Filter duplicates within 30s
+    ))
+    logger.info("🛡️ TRADE SAFETY SYSTEM initialized with CONSERVATIVE settings")
 
     position: Dict[str, Any] = {
         "direction": "flat",   # "long" / "short" / "flat"
@@ -162,126 +199,24 @@ async def ai_brain_ultra_loop(
 
     while True:
         try:
+            # AI Brain already receiving real-time data from StreamEngine processor
+            # Just build signal and manage trading logic
+            
             last_price: Optional[float] = None
-            last_ts: Optional[datetime] = None
+            
+            # Get current price from brain state
+            if brain.state.last_price:
+                last_price = brain.state.last_price
 
-            buy_volume = 0.0
-            sell_volume = 0.0
-            trade_count = 0
+            buy_volume = sum(brain.state.buy_volume_window) if brain.state.buy_volume_window else 0.0
+            sell_volume = sum(brain.state.sell_volume_window) if brain.state.sell_volume_window else 0.0
+            trade_count = len(brain.state.buy_volume_window) if brain.state.buy_volume_window else 0
+            cvd = brain.state.cvd if hasattr(brain.state, 'cvd') else 0.0  # Get CVD from brain
+            
+            # Whale detection from memory (simplified)
             whale_trades = 0
             max_trade_size = 0.0
             max_trade_price: Optional[float] = None
-
-            # -----------------------------
-            # Pull data from DB (if enabled)
-            # -----------------------------
-            if db_pool is not None:
-                async with db_pool.acquire() as conn:
-                    # 1) شموع 1 دقيقة (آخر 200)
-                    candle_rows = []
-                    try:
-                        candle_rows = await conn.fetch(
-                            """
-                            SELECT close, close_time
-                            FROM candles_1m
-                            WHERE symbol = $1
-                            ORDER BY close_time DESC
-                            LIMIT 200;
-                            """,
-                            symbol,
-                        )
-                    except Exception:
-                        pass
-
-                    # feed ticker series from oldest → أحدث
-                    if candle_rows:
-                        for row in reversed(candle_rows):
-                            c = float(row["close"])
-                            ts = row["close_time"]
-                            brain.update_from_ticker(
-                                {
-                                    "last": c,
-                                    "ts": int(ts.replace(tzinfo=timezone.utc).timestamp() * 1000),
-                                }
-                            )
-                        last_price = float(candle_rows[0]["close"])
-                        last_ts = candle_rows[0]["close_time"]
-
-                    # 2) آخر الصفقات
-                    trade_rows = []
-                    try:
-                        trade_rows = await conn.fetch(
-                            """
-                            SELECT side, price, size, timestamp
-                            FROM trades
-                            WHERE symbol = $1
-                            ORDER BY timestamp DESC
-                            LIMIT 200;
-                            """,
-                            symbol,
-                        )
-                    except Exception:
-                        pass
-
-                    trades_for_brain: List[Dict[str, Any]] = []
-
-                    for tr in trade_rows:
-                        side = (tr["side"] or "").lower()
-                        size = float(tr["size"] or 0)
-                        price = float(tr["price"] or 0) if tr["price"] is not None else 0.0
-                        ts_dt: datetime = tr["timestamp"]
-
-                        trade_count += 1
-                        if side == "buy":
-                            buy_volume += size
-                        elif side == "sell":
-                            sell_volume += size
-
-                        if size >= whale_threshold:
-                            whale_trades += 1
-                            if size > max_trade_size:
-                                max_trade_size = size
-                                max_trade_price = price
-
-                        trades_for_brain.append(
-                            {
-                                "side": side,
-                                "size": size,
-                                "price": price,
-                                "timestamp": int(
-                                    ts_dt.replace(tzinfo=timezone.utc).timestamp() * 1000
-                                ),
-                            }
-                        )
-
-                    if trades_for_brain:
-                        brain.update_from_trades(trades_for_brain)
-
-                    # 3) آخر orderbook snapshot
-                    ob_row = None
-                    try:
-                        ob_row = await conn.fetchrow(
-                            """
-                            SELECT best_bid,best_ask,bid_volume,ask_volume,levels_data,timestamp
-                            FROM orderbook_snapshots
-                            WHERE symbol = $1
-                            ORDER BY timestamp DESC
-                            LIMIT 1;
-                            """,
-                            symbol,
-                        )
-                    except Exception:
-                        pass
-
-                    if ob_row:
-                        snapshot = {
-                            "best_bid": ob_row["best_bid"],
-                            "best_ask": ob_row["best_ask"],
-                            "bid_volume": ob_row["bid_volume"],
-                            "ask_volume": ob_row["ask_volume"],
-                            "levels_data": ob_row["levels_data"],
-                        }
-                        brain.update_from_orderbook(snapshot)
 
             # -----------------------------
             # Build AI signal
@@ -299,6 +234,39 @@ async def ai_brain_ultra_loop(
                 f"AI SIGNAL → dir={direction}, conf={confidence:.3f}, "
                 f"regime={regime}, reason={reason}, price={price_for_decision}"
             )
+            
+            # -----------------------------
+            # Update system_state for Dashboard
+            # -----------------------------
+            system_state.update_from_signal({
+                "direction": direction,
+                "confidence": confidence,
+                "reason": reason,
+                "regime": regime,
+                "price": price_for_decision,
+                "scores": sig.get("scores", {}),
+            })
+            
+            system_state.update_from_trades(
+                buy_vol=buy_volume,
+                sell_vol=sell_volume,
+                trade_count=trade_count,
+                whale_trades=whale_trades,
+                max_size=max_trade_size,
+                cvd=cvd,
+            )
+            
+            if brain.state.best_bid and brain.state.best_ask:
+                system_state.update_from_orderbook(
+                    bid=brain.state.best_bid,
+                    ask=brain.state.best_ask,
+                    bid_vol=brain.state.bid_volume or 0.0,
+                    ask_vol=brain.state.ask_volume or 0.0,
+                )
+            
+            # Update spoof risk from scores
+            spoof_risk = sig.get("scores", {}).get("spoof_risk", 0.0)
+            system_state.spoof_risk = spoof_risk
 
             # -----------------------------
             # Auto-Trade Logic (Paper)
@@ -313,10 +281,27 @@ async def ai_brain_ultra_loop(
             else:
                 trade_signal_str = "WAIT"
 
+            # ============================================================
+            # 🛡️ SAFETY GATE - All signals must pass safety checks
+            # ============================================================
+            safety_decision = trade_safety.should_execute_signal(sig)
+            
+            if not safety_decision.approved:
+                logger.warning(
+                    f"❌ SAFETY BLOCK: {safety_decision.reason} | "
+                    f"Conf={confidence:.1%}, Regime={regime}, "
+                    f"Spoof={sig.get('spoof_score', 0):.1%}, "
+                    f"Risk={sig.get('risk_penalty', 0):.1%}"
+                )
+                # Update system state with rejection
+                system_state.last_rejection_reason = safety_decision.reason
+                system_state.total_rejections = system_state.total_rejections + 1 if hasattr(system_state, 'total_rejections') else 1
+            
             if (
                 direction in ("long", "short")
                 and confidence >= min_trade_conf
                 and price_for_decision is not None
+                and safety_decision.approved  # ✅ SAFETY CHECK
             ):
                 # open / flip / manage
                 if position["direction"] == "flat":
@@ -325,6 +310,16 @@ async def ai_brain_ultra_loop(
                     position["size"] = base_pos_size
                     position["entry_price"] = price_for_decision
                     position["opened_at"] = datetime.now(timezone.utc)
+                    
+                    # 🛡️ Record trade in safety system
+                    trade_safety.record_trade({
+                        "direction": direction,
+                        "price": price_for_decision,
+                        "size": base_pos_size,
+                        "timestamp": position["opened_at"],
+                        "is_flip": False
+                    })
+                    logger.info(f"✅ SAFETY: Trade recorded - {direction} @ {price_for_decision:.2f}")
 
                     auto_event = {
                         "symbol": symbol,
@@ -341,6 +336,19 @@ async def ai_brain_ultra_loop(
 
                 elif position["direction"] != direction:
                     # flip: close then open opposite (as two events)
+                    close_time = datetime.now(timezone.utc)
+                    
+                    # Calculate P&L for closed position
+                    if position["entry_price"]:
+                        if position["direction"] == "long":
+                            pnl = (price_for_decision - position["entry_price"]) * position["size"]
+                        else:  # short
+                            pnl = (position["entry_price"] - price_for_decision) * position["size"]
+                        
+                        # 🛡️ Record trade result for loss tracking
+                        trade_safety.record_trade_result(pnl=pnl, is_win=(pnl > 0))
+                        logger.info(f"📊 SAFETY: P&L recorded - ${pnl:.2f} ({'WIN' if pnl > 0 else 'LOSS'})")
+                    
                     close_event = {
                         "symbol": symbol,
                         "event_type": "AUTO_TRADE_CLOSE",
@@ -350,9 +358,9 @@ async def ai_brain_ultra_loop(
                             "entry_price": position["entry_price"],
                             "close_price": price_for_decision,
                             "opened_at": position["opened_at"],
-                            "closed_at": datetime.now(timezone.utc),
+                            "closed_at": close_time,
                         },
-                        "timestamp": datetime.now(timezone.utc),
+                        "timestamp": close_time,
                     }
 
                     # open new
@@ -360,6 +368,16 @@ async def ai_brain_ultra_loop(
                     position["size"] = base_pos_size
                     position["entry_price"] = price_for_decision
                     position["opened_at"] = datetime.now(timezone.utc)
+                    
+                    # 🛡️ Record flip trade in safety system
+                    trade_safety.record_trade({
+                        "direction": direction,
+                        "price": price_for_decision,
+                        "size": base_pos_size,
+                        "timestamp": position["opened_at"],
+                        "is_flip": True
+                    })
+                    logger.info(f"🔄 SAFETY: Flip recorded - {direction} @ {price_for_decision:.2f}")
 
                     open_event = {
                         "symbol": symbol,
@@ -468,6 +486,28 @@ async def ai_brain_ultra_loop(
                 "confidence": round(confidence * 100, 1),
                 "generated_at": now_iso,
             }
+            
+            # Update strategy in system_state
+            system_state.update_strategy(
+                entry=strategy_entry,
+                tp=tp,
+                sl=sl,
+            )
+            
+            # Update position in system_state
+            system_state.update_position(
+                direction=position["direction"],
+                size=position["size"],
+                entry=position["entry_price"],
+                pnl=0.0,  # TODO: calculate PnL
+            )
+            
+            # Update system status
+            system_state.update_system_status(
+                ai_enabled=True,
+                auto_trading=False,  # Paper trading mode
+                uptime=0.0,  # TODO: calculate uptime
+            )
 
             # write JSON files (for FastAPI dashboard)
             try:
@@ -575,7 +615,7 @@ async def main() -> None:
 
     # ----------------- DB Writer & Pool -----------------
     db_writer: Optional[NeonDBWriter] = None
-    db_pool: Optional["asyncpg.Pool"] = None
+    db_pool: Optional[Any] = None
 
     if asyncpg is None:
         logger.warning("asyncpg not available → DB features disabled.")
@@ -594,6 +634,11 @@ async def main() -> None:
                 logger.warning(f"Failed to create read-only DB pool: {e}")
                 db_pool = None
 
+    # ----------------- AI Brain (create BEFORE StreamEngine) -----------------
+    ai_logger = logging.getLogger("ai-ultra")
+    brain = AIBrain(symbol=target_symbol, logger=ai_logger)
+    logger.info("AI Brain created and ready for real-time stream feed.")
+
     # ----------------- StreamEngine -----------------
     engine_logger = logging.getLogger("stream")
     engine = StreamEngine(
@@ -602,6 +647,7 @@ async def main() -> None:
         ws_url=settings.okx.public_ws,
         logger=engine_logger,
         db_writer=db_writer,
+        ai_brain=brain,  # 🔥 Feed AI Brain directly from stream!
     )
 
     tasks: List[asyncio.Task] = []
@@ -615,6 +661,8 @@ async def main() -> None:
                 symbol=target_symbol,
                 db_pool=db_pool,
                 writer=db_writer,
+                brain=brain,  # 🔥 Pass the same brain instance
+                interval_sec=2,  # 🔥 تقليل الفترة لـ 2 ثانية للتجربة
             )
         )
     )

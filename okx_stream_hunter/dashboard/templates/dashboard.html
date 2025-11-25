@@ -1,0 +1,771 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🔥 GOD MODE Ultra Dashboard v3</title>
+    
+    <!-- Tailwind CSS via CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Lightweight Charts Library -->
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    
+    <!-- Chart.js for additional charts -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
+            color: #fff;
+            overflow-x: hidden;
+        }
+        
+        /* Top Bar Styles */
+        .top-bar {
+            background: rgba(0, 0, 0, 0.5);
+            backdrop-filter: blur(10px);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 1rem 2rem;
+            position: sticky;
+            top: 0;
+            z-index: 1000;
+        }
+        
+        .live-dot {
+            width: 12px;
+            height: 12px;
+            background: #00ff88;
+            border-radius: 50%;
+            display: inline-block;
+            animation: pulse 2s infinite;
+            box-shadow: 0 0 10px #00ff88;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.6; transform: scale(0.95); }
+        }
+        
+        .tag {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            margin: 0 0.25rem;
+        }
+        
+        .tag-trend { background: rgba(0, 255, 136, 0.2); color: #00ff88; border: 1px solid #00ff88; }
+        .tag-range { background: rgba(255, 170, 0, 0.2); color: #ffaa00; border: 1px solid #ffaa00; }
+        .tag-volatility-low { background: rgba(0, 123, 255, 0.2); color: #007bff; border: 1px solid #007bff; }
+        .tag-volatility-normal { background: rgba(255, 170, 0, 0.2); color: #ffaa00; border: 1px solid #ffaa00; }
+        .tag-volatility-high { background: rgba(255, 68, 68, 0.2); color: #ff4444; border: 1px solid #ff4444; }
+        .tag-spoof-clean { background: rgba(0, 255, 136, 0.2); color: #00ff88; border: 1px solid #00ff88; }
+        .tag-spoof-medium { background: rgba(255, 170, 0, 0.2); color: #ffaa00; border: 1px solid #ffaa00; }
+        .tag-spoof-high { background: rgba(255, 68, 68, 0.2); color: #ff4444; border: 1px solid #ff4444; }
+        .tag-paper { background: rgba(0, 123, 255, 0.2); color: #007bff; border: 1px solid #007bff; }
+        .tag-live { background: rgba(255, 68, 68, 0.2); color: #ff4444; border: 1px solid #ff4444; }
+        
+        /* Panel Styles */
+        .panel {
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            padding: 1.5rem;
+            height: 100%;
+            transition: all 0.3s ease;
+        }
+        
+        .panel:hover {
+            background: rgba(255, 255, 255, 0.08);
+            border-color: rgba(255, 255, 255, 0.2);
+            transform: translateY(-2px);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }
+        
+        .panel-title {
+            font-size: 1.25rem;
+            font-weight: 700;
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        /* Signal Badges */
+        .signal-badge {
+            display: inline-block;
+            padding: 0.75rem 1.5rem;
+            border-radius: 8px;
+            font-size: 1.5rem;
+            font-weight: 800;
+            text-align: center;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        .signal-buy { background: linear-gradient(135deg, #00ff88 0%, #00cc6a 100%); color: #000; }
+        .signal-sell { background: linear-gradient(135deg, #ff4444 0%, #cc0000 100%); color: #fff; }
+        .signal-flat { background: linear-gradient(135deg, #ffaa00 0%, #cc8800 100%); color: #000; }
+        
+        .direction-long { color: #00ff88; }
+        .direction-short { color: #ff4444; }
+        .direction-flat { color: #ffaa00; }
+        
+        /* Confidence Gauge */
+        .confidence-gauge {
+            position: relative;
+            width: 150px;
+            height: 150px;
+            margin: 1rem auto;
+        }
+        
+        .confidence-circle {
+            transform: rotate(-90deg);
+        }
+        
+        .confidence-text {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 2rem;
+            font-weight: 800;
+        }
+        
+        /* Metric Styles */
+        .metric {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.75rem 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        
+        .metric:last-child {
+            border-bottom: none;
+        }
+        
+        .metric-label {
+            font-size: 0.9rem;
+            color: rgba(255, 255, 255, 0.7);
+            font-weight: 500;
+        }
+        
+        .metric-value {
+            font-size: 1.1rem;
+            font-weight: 700;
+        }
+        
+        /* Score Badge */
+        .score-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            font-weight: 600;
+            margin: 0.25rem;
+            background: rgba(255, 255, 255, 0.1);
+        }
+        
+        .score-high { border-left: 4px solid #00ff88; }
+        .score-medium { border-left: 4px solid #ffaa00; }
+        .score-low { border-left: 4px solid #ff4444; }
+        
+        /* Bar Chart for Orderflow */
+        .bar-container {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            margin: 1rem 0;
+        }
+        
+        .bar {
+            height: 30px;
+            border-radius: 4px;
+            transition: all 0.3s ease;
+        }
+        
+        .bar-buy { background: linear-gradient(90deg, transparent 0%, #00ff88 100%); }
+        .bar-sell { background: linear-gradient(90deg, transparent 0%, #ff4444 100%); }
+        
+        /* Meter Styles */
+        .meter {
+            height: 20px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            overflow: hidden;
+            position: relative;
+            margin: 1rem 0;
+        }
+        
+        .meter-fill {
+            height: 100%;
+            border-radius: 10px;
+            transition: all 0.3s ease;
+        }
+        
+        .meter-imbalance { background: linear-gradient(90deg, #ff4444 0%, #ffaa00 50%, #00ff88 100%); }
+        .meter-spoof { background: linear-gradient(90deg, #00ff88 0%, #ffaa00 50%, #ff4444 100%); }
+        
+        /* Trade History */
+        .trade-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.75rem;
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.05);
+            margin: 0.5rem 0;
+            font-size: 0.9rem;
+        }
+        
+        .trade-win { border-left: 4px solid #00ff88; }
+        .trade-loss { border-left: 4px solid #ff4444; }
+        
+        /* Table Styles */
+        .signals-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 1rem;
+        }
+        
+        .signals-table th {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 0.75rem;
+            text-align: left;
+            font-weight: 600;
+            font-size: 0.9rem;
+            border-bottom: 2px solid rgba(255, 255, 255, 0.2);
+        }
+        
+        .signals-table td {
+            padding: 0.75rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            font-size: 0.9rem;
+        }
+        
+        .signals-table tr:hover {
+            background: rgba(255, 255, 255, 0.05);
+        }
+        
+        /* Status Badge */
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            font-weight: 600;
+        }
+        
+        .status-on {
+            background: rgba(0, 255, 136, 0.2);
+            color: #00ff88;
+            border: 1px solid #00ff88;
+        }
+        
+        .status-off {
+            background: rgba(255, 68, 68, 0.2);
+            color: #ff4444;
+            border: 1px solid #ff4444;
+        }
+        
+        /* Loading State */
+        .loading {
+            text-align: center;
+            padding: 2rem;
+            color: rgba(255, 255, 255, 0.5);
+            font-style: italic;
+        }
+        
+        /* Error State */
+        .error-badge {
+            background: rgba(255, 68, 68, 0.2);
+            color: #ff4444;
+            border: 1px solid #ff4444;
+            padding: 0.5rem 1rem;
+            border-radius: 8px;
+            display: inline-block;
+            font-weight: 600;
+        }
+        
+        /* Chart Container */
+        .chart-container {
+            width: 100%;
+            height: 350px;
+            margin-top: 1rem;
+        }
+        
+        /* Responsive */
+        @media (max-width: 768px) {
+            .top-bar {
+                padding: 1rem;
+            }
+            
+            .panel {
+                padding: 1rem;
+            }
+            
+            .signal-badge {
+                font-size: 1.2rem;
+                padding: 0.5rem 1rem;
+            }
+            
+            .confidence-gauge {
+                width: 120px;
+                height: 120px;
+            }
+            
+            .confidence-text {
+                font-size: 1.5rem;
+            }
+        }
+        
+        /* Tooltip */
+        .tooltip {
+            position: relative;
+            cursor: help;
+        }
+        
+        .tooltip:hover::after {
+            content: attr(data-tooltip);
+            position: absolute;
+            bottom: 100%;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.9);
+            color: #fff;
+            padding: 0.5rem 1rem;
+            border-radius: 8px;
+            font-size: 0.85rem;
+            white-space: nowrap;
+            z-index: 1000;
+            margin-bottom: 0.5rem;
+        }
+    </style>
+</head>
+<body>
+    <!-- ============================================================ -->
+    <!-- TOP BAR - Market Overview -->
+    <!-- ============================================================ -->
+    <div class="top-bar">
+        <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+            <!-- Left: Symbol & Price Info -->
+            <div class="flex items-center gap-4 flex-wrap">
+                <div class="flex items-center gap-2">
+                    <span class="live-dot"></span>
+                    <span class="text-2xl font-bold" id="symbol">BTC-USDT-SWAP</span>
+                </div>
+                <div class="text-3xl font-bold" id="current-price">$--</div>
+                <div id="price-change" class="text-lg font-semibold">--</div>
+            </div>
+            
+            <!-- Right: Market Tags -->
+            <div class="flex items-center gap-2 flex-wrap">
+                <span class="tag" id="regime-tag">Loading...</span>
+                <span class="tag" id="volatility-tag">Loading...</span>
+                <span class="tag" id="spoof-tag">Loading...</span>
+                <span class="tag" id="mode-tag">Paper</span>
+            </div>
+        </div>
+        
+        <!-- Secondary Info -->
+        <div class="flex items-center gap-4 mt-2 text-sm text-gray-400">
+            <span>Spread: <span id="spread">--</span></span>
+            <span>24h Vol: <span id="volume-24h">--</span></span>
+            <span>Last Update: <span id="last-update">--</span></span>
+        </div>
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- MAIN CONTAINER -->
+    <!-- ============================================================ -->
+    <div class="container mx-auto px-4 py-6">
+        
+        <!-- ============================================================ -->
+        <!-- MAIN GRID (2x2 Panels) -->
+        <!-- ============================================================ -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+            
+            <!-- ======================================== -->
+            <!-- PANEL A: Live Candles Chart -->
+            <!-- ======================================== -->
+            <div class="panel">
+                <div class="panel-title">
+                    📊 Live Candles Chart
+                </div>
+                <div id="candles-chart" class="chart-container">
+                    <div class="loading">Waiting for live data...</div>
+                </div>
+                <div class="flex justify-between text-xs text-gray-400 mt-2">
+                    <span>Entry: <span id="chart-entry" class="text-blue-400">--</span></span>
+                    <span>TP: <span id="chart-tp" class="text-green-400">--</span></span>
+                    <span>SL: <span id="chart-sl" class="text-red-400">--</span></span>
+                </div>
+            </div>
+            
+            <!-- ======================================== -->
+            <!-- PANEL B: AI Signal & Confidence -->
+            <!-- ======================================== -->
+            <div class="panel">
+                <div class="panel-title">
+                    🤖 AI Signal & Confidence
+                </div>
+                
+                <!-- Signal Badge -->
+                <div class="text-center mb-4">
+                    <div class="signal-badge" id="signal-badge">WAIT</div>
+                    <div class="text-xl font-bold mt-2">
+                        Direction: <span id="signal-direction" class="direction-flat">FLAT</span>
+                    </div>
+                </div>
+                
+                <!-- Confidence Gauge -->
+                <div class="confidence-gauge">
+                    <svg width="150" height="150">
+                        <circle cx="75" cy="75" r="65" fill="none" stroke="rgba(255,255,255,0.1)" stroke-width="10"/>
+                        <circle id="confidence-circle" class="confidence-circle" cx="75" cy="75" r="65" 
+                                fill="none" stroke="#00ff88" stroke-width="10" 
+                                stroke-dasharray="408" stroke-dashoffset="408"
+                                stroke-linecap="round"/>
+                    </svg>
+                    <div class="confidence-text" id="confidence-text">0%</div>
+                </div>
+                
+                <!-- Regime & Reason -->
+                <div class="metric">
+                    <span class="metric-label">Regime</span>
+                    <span class="metric-value" id="signal-regime">--</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">Reason</span>
+                    <span class="metric-value text-sm tooltip" id="signal-reason" data-tooltip="Full reason shown on hover">--</span>
+                </div>
+                
+                <!-- Score Badges -->
+                <div class="mt-4">
+                    <div class="text-sm font-semibold mb-2 text-gray-400">Detection Scores:</div>
+                    <div class="flex flex-wrap gap-2" id="score-badges">
+                        <span class="score-badge score-low">Loading...</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- ======================================== -->
+            <!-- PANEL C: Orderflow & Microstructure -->
+            <!-- ======================================== -->
+            <div class="panel">
+                <div class="panel-title">
+                    📈 Orderflow & Microstructure
+                </div>
+                
+                <!-- Buy vs Sell Volume -->
+                <div class="mb-4">
+                    <div class="text-sm font-semibold mb-2 text-gray-400">Volume (Last Window):</div>
+                    <div class="bar-container">
+                        <span class="text-sm w-12 text-right text-green-400" id="buy-volume-text">0</span>
+                        <div class="flex-1 relative">
+                            <div id="buy-bar" class="bar bar-buy" style="width: 50%;"></div>
+                        </div>
+                    </div>
+                    <div class="bar-container">
+                        <span class="text-sm w-12 text-right text-red-400" id="sell-volume-text">0</span>
+                        <div class="flex-1 relative">
+                            <div id="sell-bar" class="bar bar-sell" style="width: 50%;"></div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Orderbook Imbalance Meter -->
+                <div class="mb-4">
+                    <div class="flex justify-between text-sm mb-1">
+                        <span class="text-gray-400">Orderbook Imbalance</span>
+                        <span id="imbalance-value" class="font-semibold">50%</span>
+                    </div>
+                    <div class="meter">
+                        <div id="imbalance-meter" class="meter-fill meter-imbalance" style="width: 50%;"></div>
+                    </div>
+                    <div class="flex justify-between text-xs text-gray-500">
+                        <span>Heavy Asks</span>
+                        <span>Balanced</span>
+                        <span>Heavy Bids</span>
+                    </div>
+                </div>
+                
+                <!-- Spoofing Risk Meter -->
+                <div class="mb-4">
+                    <div class="flex justify-between text-sm mb-1">
+                        <span class="text-gray-400">Spoofing Risk</span>
+                        <span id="spoof-value" class="font-semibold">0%</span>
+                    </div>
+                    <div class="meter">
+                        <div id="spoof-meter" class="meter-fill meter-spoof" style="width: 0%;"></div>
+                    </div>
+                    <div class="flex justify-between text-xs text-gray-500">
+                        <span>Clean</span>
+                        <span>Moderate</span>
+                        <span>High</span>
+                    </div>
+                </div>
+                
+                <!-- Additional Metrics -->
+                <div class="metric">
+                    <span class="metric-label">Spread</span>
+                    <span class="metric-value" id="micro-spread">-- bps</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">Depth Imbalance</span>
+                    <span class="metric-value" id="depth-imbalance">--</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">Whale Trades</span>
+                    <span class="metric-value" id="whale-trades">0</span>
+                </div>
+            </div>
+            
+            <!-- ======================================== -->
+            <!-- PANEL D: Position & Risk -->
+            <!-- ======================================== -->
+            <div class="panel">
+                <div class="panel-title">
+                    💼 Position & Risk
+                </div>
+                
+                <!-- Current Position -->
+                <div class="mb-4 p-4 rounded-lg" style="background: rgba(255,255,255,0.05);">
+                    <div class="text-sm font-semibold mb-2 text-gray-400">Current Position:</div>
+                    <div class="metric">
+                        <span class="metric-label">Direction</span>
+                        <span class="metric-value" id="pos-direction">FLAT</span>
+                    </div>
+                    <div class="metric">
+                        <span class="metric-label">Size</span>
+                        <span class="metric-value" id="pos-size">0</span>
+                    </div>
+                    <div class="metric">
+                        <span class="metric-label">Entry Price</span>
+                        <span class="metric-value" id="pos-entry">$--</span>
+                    </div>
+                    <div class="metric">
+                        <span class="metric-label">Unrealized PnL</span>
+                        <span class="metric-value" id="pos-pnl">$0.00</span>
+                    </div>
+                </div>
+                
+                <!-- Risk Metrics -->
+                <div class="metric">
+                    <span class="metric-label">Risk per Trade</span>
+                    <span class="metric-value" id="risk-per-trade">2.0%</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">R:R Ratio</span>
+                    <span class="metric-value" id="rr-ratio">--</span>
+                </div>
+                
+                <!-- Recent Trades -->
+                <div class="mt-4">
+                    <div class="text-sm font-semibold mb-2 text-gray-400">Recent Trades:</div>
+                    <div id="recent-trades" class="max-h-40 overflow-y-auto">
+                        <div class="text-xs text-gray-500 text-center py-4">No trades yet</div>
+                    </div>
+                </div>
+            </div>
+            
+        </div>
+        
+        <!-- ============================================================ -->
+        <!-- SECONDARY SECTIONS -->
+        <!-- ============================================================ -->
+        
+        <!-- Recent Signals Table -->
+        <div class="panel mb-6">
+            <div class="panel-title">
+                📡 Recent Signals
+            </div>
+            <div class="overflow-x-auto">
+                <table class="signals-table">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Signal</th>
+                            <th>Direction</th>
+                            <th>Confidence</th>
+                            <th>Price</th>
+                            <th>Regime</th>
+                            <th>Reason</th>
+                        </tr>
+                    </thead>
+                    <tbody id="signals-tbody">
+                        <tr>
+                            <td colspan="7" class="text-center text-gray-500 py-4">
+                                Waiting for signals...
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        
+        <!-- System Status & Heartbeat -->
+        <div class="panel">
+            <div class="panel-title">
+                ⚡ System Status & Heartbeat
+            </div>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div class="text-center">
+                    <div class="text-sm text-gray-400 mb-2">AI Brain</div>
+                    <div class="status-badge" id="status-ai">
+                        <span>●</span> Loading...
+                    </div>
+                </div>
+                <div class="text-center">
+                    <div class="text-sm text-gray-400 mb-2">Auto Trading</div>
+                    <div class="status-badge" id="status-trading">
+                        <span>●</span> Loading...
+                    </div>
+                </div>
+                <div class="text-center">
+                    <div class="text-sm text-gray-400 mb-2">Last Heartbeat</div>
+                    <div class="text-sm font-semibold" id="heartbeat-time">--</div>
+                </div>
+                <div class="text-center">
+                    <div class="text-sm text-gray-400 mb-2">Dashboard</div>
+                    <div class="status-badge status-on">
+                        <span>●</span> v3.0 Ultra
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- PHASE 3: Advanced Monitoring Panels -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+            <!-- Live Trades Panel -->
+            <div class="panel">
+                <div class="panel-header">
+                    <span class="panel-icon">📊</span>
+                    <h3>Live Trades</h3>
+                </div>
+                <div class="panel-body">
+                    <div id="liveTradesContainer">
+                        <div class="text-gray-400">No active trades</div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Safety Status Panel -->
+            <div class="panel">
+                <div class="panel-header">
+                    <span class="panel-icon">🛡️</span>
+                    <h3>Safety Status</h3>
+                </div>
+                <div class="panel-body">
+                    <div id="safetyStatusContainer">
+                        <div class="text-gray-400">Loading...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- AI Confidence Chart -->
+        <div class="panel mb-6">
+            <div class="panel-header">
+                <span class="panel-icon">🎯</span>
+                <h3>AI Confidence History</h3>
+            </div>
+            <div class="panel-body">
+                <div style="height: 250px;">
+                    <canvas id="confidenceChart"></canvas>
+                </div>
+            </div>
+        </div>
+        
+        <!-- RL Rewards Chart -->
+        <div class="panel mb-6">
+            <div class="panel-header">
+                <span class="panel-icon">🧠</span>
+                <h3>RL Agent Learning Curve</h3>
+            </div>
+            <div class="panel-body">
+                <div style="height: 250px;">
+                    <canvas id="rlRewardsChart"></canvas>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Orderflow Dominance Chart -->
+        <div class="panel mb-6">
+            <div class="panel-header">
+                <span class="panel-icon">⚖️</span>
+                <h3>Orderflow Dominance</h3>
+            </div>
+            <div class="panel-body">
+                <div style="height: 250px;">
+                    <canvas id="orderflowDominanceChart"></canvas>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Live PnL Chart -->
+        <div class="panel mb-6">
+            <div class="panel-header">
+                <span class="panel-icon">💰</span>
+                <h3>Live PnL Evolution</h3>
+            </div>
+            <div class="panel-body">
+                <div style="height: 250px;">
+                    <canvas id="livePnLChart"></canvas>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Performance Metrics -->
+        <div class="panel mb-6">
+            <div class="panel-header">
+                <span class="panel-icon">📈</span>
+                <h3>Performance Metrics</h3>
+            </div>
+            <div class="panel-body">
+                <div id="performanceMetricsContainer">
+                    <div class="text-gray-400">Loading...</div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- PHASE 4: Learning & Models Panel -->
+        <div class="panel mb-6">
+            <div class="panel-header">
+                <span class="panel-icon">🎓</span>
+                <h3>Learning & Models</h3>
+            </div>
+            <div class="panel-body">
+                <div id="learningStatusContainer">
+                    <div class="text-gray-400">Loading...</div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Footer -->
+        <div class="text-center text-gray-500 text-sm mt-8 pb-4">
+            <p>🔥 GOD MODE Ultra Dashboard v3.0 PHASE 3 | Powered by AI Ultra Brain 🧠</p>
+            <p class="mt-1">© 2024 Crypto Market Analyzer | Autonomous Live Trading System</p>
+        </div>
+        
+    </div>
+    
+    <!-- Load Dashboard JavaScript -->
+    <script src="/static/dashboard.js"></script>
+</body>
+</html>

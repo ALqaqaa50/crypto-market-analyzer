@@ -1,0 +1,88 @@
+# Trading Configuration - PROMETHEUS v7 Phase 2
+
+# Symbol Configuration
+symbol: "BTC-USDT-SWAP"
+
+# Trading Mode
+paper_trading: true  # Start with paper trading
+auto_trading: false  # Manual approval required initially
+
+# Balance Configuration
+initial_balance: 10000.0  # Starting balance for paper trading
+
+# Risk Management
+max_risk_per_trade: 0.02  # 2% per trade
+max_daily_drawdown: 0.10  # 10% daily drawdown limit
+max_daily_trades: 20
+max_open_positions: 1
+
+# Position Sizing
+min_position_size: 0.001
+max_position_size: 1.0
+leverage: 1  # Conservative leverage
+
+# Confidence Thresholds
+min_confidence_to_trade: 0.60  # 60% minimum confidence
+high_confidence_threshold: 0.75  # 75% for aggressive sizing
+
+# Decision Making
+decision_interval_seconds: 5  # Check every 5 seconds
+sl_atr_multiplier: 2.0
+tp_risk_reward_ratio: 2.5
+
+# Market Regime Filters
+enable_regime_filter: true
+allowed_regimes:
+  - "trend_up"
+  - "trend_down"
+  - "breakout"
+  - "range"
+
+blocked_regimes:
+  - "volatility_expansion"  # Too risky
+
+# RL Agent Settings
+rl_enabled: true
+rl_adaptation_rate: 0.05
+rl_min_trades_for_adaptation: 10
+
+# Safety Settings
+enable_daily_pnl_lock: true
+enable_volatility_filter: true
+max_volatility_multiplier: 3.0
+
+# Self-Learning Configuration (PHASE 4)
+self_learning:
+  enable_self_learning: false  # Must be manually enabled
+  enable_shadow_mode: false  # Shadow mode for testing candidates
+  
+  # Training Triggers
+  min_trades_before_retrain: 100  # Minimum trades before triggering offline training
+  retrain_interval_hours: 24  # Check retraining every 24 hours
+  
+  # Promotion Criteria
+  min_eval_sharpe_for_promotion: 1.0  # Minimum Sharpe ratio for promotion
+  min_eval_winrate_for_promotion: 55.0  # Minimum win rate (%)
+  max_allowed_drawdown_for_candidate: 20.0  # Maximum drawdown (%)
+  min_improvement_over_production: 0.05  # 5% improvement required
+  
+  # Safety Settings
+  manual_approval_required: true  # Require manual approval for promotion
+  allow_auto_rollback: true  # Auto-rollback if production degrades
+  performance_monitor_window_trades: 50  # Monitor last N trades for degradation
+  rollback_threshold_winrate_drop: 10.0  # Rollback if win rate drops by 10%
+  
+  # Data Management
+  experience_buffer_size: 10000  # In-memory buffer size
+  log_file_format: "parquet"  # parquet or csv
+  log_rotation: "daily"  # daily, weekly, monthly
+  keep_logs_days: 90  # Keep logs for 90 days
+
+# Logging
+log_level: "INFO"
+save_trades_log: true
+save_rl_state: true
+
+# WebSocket Settings
+ws_reconnect_delay: 5
+ws_ping_interval: 30

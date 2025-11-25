@@ -50,6 +50,7 @@ okx:
 database:
   # Set via environment variable: NEON_DATABASE_URL
   enabled: true
+  url: "${NEON_DATABASE_URL}"
   pool_min_size: 2
   pool_max_size: 10
   command_timeout: 60

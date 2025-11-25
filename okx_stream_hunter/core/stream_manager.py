@@ -25,6 +25,7 @@ class StreamEngine:
         logger: Optional[logging.Logger] = None,
         ws_url: str = "wss://ws.okx.com:8443/ws/v5/public",
         db_writer: Optional[NeonDBWriter] = None,
+        ai_brain=None,
     ) -> None:
 
         self.logger = logger or logging.getLogger(__name__)
@@ -39,6 +40,7 @@ class StreamEngine:
             db_writer=db_writer,
             db_enable_trades=True,
             db_enable_orderbook=True,
+            ai_brain=ai_brain,
         )
 
         # Build subscription arguments

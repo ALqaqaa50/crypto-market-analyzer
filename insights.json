@@ -1,0 +1,27 @@
+{
+  "signal": "SELL",
+  "direction": "short",
+  "confidence": 36.5,
+  "reason": "orderflow=sell,orderbook=bid,spoof_risk,vol=0.0000",
+  "regime": "range",
+  "price": 87550.5,
+  "buy_volume": 697.5,
+  "sell_volume": 13624.79,
+  "trade_count": 60,
+  "whale_trades": 0,
+  "max_trade_size": 0.0,
+  "max_trade_price": null,
+  "position": {
+    "direction": "flat",
+    "size": 0.0,
+    "entry_price": null
+  },
+  "scores": {
+    "trend": 0.0,
+    "orderflow": -0.9025993748206467,
+    "orderbook": 0.7047281528221973,
+    "spoof": 1.0,
+    "risk_penalty": 1.0
+  },
+  "generated_at": "2025-11-25T12:45:31.187224+00:00"
+}

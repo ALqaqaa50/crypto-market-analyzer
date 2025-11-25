@@ -62,6 +62,7 @@ class MarketState:
     # order flow
     buy_volume_window: Deque[float] = field(default_factory=deque)
     sell_volume_window: Deque[float] = field(default_factory=deque)
+    cvd: float = 0.0  # Cumulative Volume Delta
 
     # orderbook
     best_bid: Optional[float] = None
@@ -124,6 +125,9 @@ class AIBrain:
             ts = time.time()
 
         self._update_price_series(price, ts)
+        ema_fast_str = f"{self.state.ema_fast:.2f}" if self.state.ema_fast else "None"
+        ema_slow_str = f"{self.state.ema_slow:.2f}" if self.state.ema_slow else "None"
+        self.log.info(f"✅ AI Brain received TICKER: price={price:.2f}, ema_fast={ema_fast_str}, ema_slow={ema_slow_str}")
 
     def update_from_trades(self, trades: List[Dict]) -> None:
         """
@@ -153,6 +157,13 @@ class AIBrain:
             return
 
         self._update_orderflow(buy_vol, sell_vol)
+        
+        # Update CVD (Cumulative Volume Delta)
+        self.state.cvd += (buy_vol - sell_vol)
+        
+        total_buy = sum(self.state.buy_volume_window)
+        total_sell = sum(self.state.sell_volume_window)
+        self.log.info(f"✅ AI Brain received TRADES: {len(trades)} trades | buy_vol={buy_vol:.2f}, sell_vol={sell_vol:.2f} | total_buy={total_buy:.2f}, total_sell={total_sell:.2f}")
 
     def update_from_orderbook(self, snapshot: Dict) -> None:
         """
@@ -188,6 +199,16 @@ class AIBrain:
         levels_data = snapshot.get("levels_data")
         if isinstance(levels_data, dict):
             self._detect_spoofing(levels_data)
+        
+        mid = (best_bid + best_ask) / 2.0 if best_bid and best_ask else None
+        mid_str = f"{mid:.2f}" if mid else "None"
+        bid_vol_str = f"{bid_vol:.2f}" if bid_vol else "None"
+        ask_vol_str = f"{ask_vol:.2f}" if ask_vol else "None"
+        spread_str = f"{st.spread:.4f}" if st.spread else "None"
+        self.log.info(
+            f"✅ AI Brain received ORDERBOOK: bid={best_bid}, ask={best_ask}, mid={mid_str}, "
+            f"bid_vol={bid_vol_str}, ask_vol={ask_vol_str}, spread={spread_str}"
+        )
 
     def update_from_indicator(self, indicator: Dict) -> None:
         """

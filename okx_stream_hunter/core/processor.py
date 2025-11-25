@@ -7,6 +7,9 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from okx_stream_hunter.storage.neon_writer import NeonDBWriter
+from okx_stream_hunter.modules.whales.detector import WhaleDetector
+from okx_stream_hunter.modules.volume.cvd import CVDEngine
+from okx_stream_hunter.modules.candles.builder import MultiTimeframeCandleBuilder, Candle
 
 
 @dataclass
@@ -39,6 +42,7 @@ class MarketProcessor:
     - Maintain light-weight in-memory state
     - Compute simple CVD and mid-price
     - Optionally persist data to PostgreSQL via NeonDBWriter
+    - Feed AI Brain in real-time (if provided)
     """
 
     def __init__(
@@ -47,6 +51,7 @@ class MarketProcessor:
         db_writer: Optional[NeonDBWriter] = None,
         db_enable_trades: bool = True,
         db_enable_orderbook: bool = True,
+        ai_brain: Optional[Any] = None,
     ) -> None:
         self.logger = logger or logging.getLogger(__name__)
 
@@ -66,6 +71,25 @@ class MarketProcessor:
         self.db_writer = db_writer
         self.db_enable_trades = db_enable_trades
         self.db_enable_orderbook = db_enable_orderbook
+        
+        # Optional AI Brain for real-time feed
+        self.ai_brain = ai_brain
+        
+        # Whale Detector
+        self.whale_detector = WhaleDetector()
+        self.whale_events: List[Any] = []
+        
+        # CVD Engine
+        self.cvd_engine = CVDEngine(window_size=1000)
+        
+        # Track whale detection for dashboard
+        self.whale_count = 0
+        self.last_whale_event = None
+        
+        # 🕯️ Candle Builders (1m, 5m, 15m, 1h timeframes)
+        self.candle_builders: Dict[str, MultiTimeframeCandleBuilder] = {}
+        self.closed_candles: Dict[str, List[Candle]] = {}
+        self.candle_timeframes = ["1m", "5m", "15m", "1h"]
 
     # ------------------------------------------------------------------
     async def handle_message(self, msg: Dict[str, Any]) -> None:
@@ -145,6 +169,130 @@ class MarketProcessor:
 
         if db_rows and self.db_writer and self.db_enable_trades:
             await self.db_writer.write_trades(db_rows)
+        
+        # 🐋 Whale Detection - check all trades for large orders
+        for raw in data:
+            try:
+                price = float(raw["px"])
+                size = float(raw["sz"])
+                side = raw.get("side", "").lower()
+                ts_ms = float(raw.get("ts", 0.0))
+                
+                # Check if whale trade
+                whale_event = self.whale_detector.check_trade({
+                    'price': price,
+                    'size': size,
+                    'side': side,
+                    'timestamp': ts_ms / 1000.0
+                })
+                
+                if whale_event:
+                    self.whale_count += 1
+                    self.last_whale_event = whale_event
+                    self.whale_events.append(whale_event)
+                    if len(self.whale_events) > 100:
+                        self.whale_events = self.whale_events[-50:]
+                    
+                    self.logger.warning(
+                        f"🐋 WHALE DETECTED! Side={whale_event.side.upper()}, "
+                        f"Size={whale_event.size:.2f}, "
+                        f"USD=${whale_event.usd_value:,.0f}, "
+                        f"Magnitude={whale_event.magnitude:.1f}x"
+                    )
+                
+                # Update CVD Engine
+                self.cvd_engine.add_trade({
+                    'side': side,
+                    'size': size,
+                    'price': price,
+                    'timestamp': ts_ms / 1000.0
+                })
+                
+                # 🕯️ Build candles from trades
+                if inst_id not in self.candle_builders:
+                    self.candle_builders[inst_id] = MultiTimeframeCandleBuilder(
+                        symbol=inst_id, 
+                        timeframes=self.candle_timeframes
+                    )
+                    self.closed_candles[inst_id] = []
+                
+                # Process tick and get closed candles
+                closed = self.candle_builders[inst_id].process_tick(
+                    price=price,
+                    size=size,
+                    ts=datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
+                )
+                
+                if closed:
+                    self.closed_candles[inst_id].extend(closed)
+                    # Keep only last 1000 candles in memory
+                    if len(self.closed_candles[inst_id]) > 1000:
+                        self.closed_candles[inst_id] = self.closed_candles[inst_id][-500:]
+                    
+                    # Update SystemState with candles
+                    from okx_stream_hunter.state import get_system_state
+                    state = get_system_state()
+                    
+                    # Organize candles by timeframe
+                    candles_by_tf = {}
+                    for c in self.closed_candles[inst_id]:
+                        if c.timeframe not in candles_by_tf:
+                            candles_by_tf[c.timeframe] = []
+                        candles_by_tf[c.timeframe].append(c)
+                    
+                    state.update_candles(
+                        candles_1m=candles_by_tf.get("1m", []),
+                        candles_5m=candles_by_tf.get("5m", []),
+                        candles_15m=candles_by_tf.get("15m", []),
+                        candles_1h=candles_by_tf.get("1h", [])
+                    )
+                    
+                    # Optionally save to DB
+                    if self.db_writer:
+                        for candle in closed:
+                            self.logger.info(
+                                f"🕯️ Candle closed: {candle.symbol} {candle.timeframe} "
+                                f"O={candle.open:.2f} H={candle.high:.2f} "
+                                f"L={candle.low:.2f} C={candle.close:.2f} V={candle.volume:.2f}"
+                            )
+                
+            except Exception as e:
+                self.logger.debug(f"Whale detection error: {e}")
+        
+        # Update SystemState with whale events and CVD
+        from okx_stream_hunter.state import get_system_state
+        state = get_system_state()
+        state.update_whale_events(self.whale_events, self.whale_count)
+        
+        # Get CVD from engine and determine trend
+        cvd_data = self.cvd_engine.get_cvd()
+        cvd_val = cvd_data.get('cvd', 0.0)
+        cvd_trend = "bullish" if cvd_val > 0 else "bearish" if cvd_val < 0 else "neutral"
+        state.update_cvd_metrics(cvd_val, cvd_trend)
+        
+        # Feed AI Brain in real-time (ticker from last trade price)
+        if self.ai_brain and bucket:
+            last_trade = bucket[-1]
+            try:
+                self.ai_brain.update_from_ticker({
+                    "last": last_trade.price,
+                    "ts": int(last_trade.ts * 1000),
+                })
+                # Also feed trades batch
+                self.ai_brain.update_from_trades([
+                    {
+                        "side": t.side,
+                        "size": t.size,
+                        "price": t.price,
+                        "timestamp": int(t.ts * 1000),
+                    }
+                    for t in bucket[-50:]  # last 50 trades
+                ])
+                self.logger.info(
+                    f"🔥 AI BRAIN ← TICKER: price={last_trade.price:.2f}, cvd={cvd_value:.2f}, trades={len(bucket[-50:])}"
+                )
+            except Exception as e:
+                self.logger.error(f"❌ Failed to feed AI brain from trades: {e}", exc_info=True)
 
     # ------------------------------------------------------------------
     async def _handle_orderbook(self, inst_id: str, msg: Dict[str, Any]) -> None:
@@ -203,6 +351,33 @@ class MarketProcessor:
             }
 
             await self.db_writer.write_orderbook_snapshots([snapshot_row])
+        
+        # Feed AI Brain in real-time
+        if self.ai_brain and ob:
+            try:
+                bid_vol_sum = sum(b.size for b in ob.bids[:5]) if ob.bids else 0.0
+                ask_vol_sum = sum(a.size for a in ob.asks[:5]) if ob.asks else 0.0
+                best_bid = ob.bids[0].price if ob.bids else None
+                best_ask = ob.asks[0].price if ob.asks else None
+                
+                self.ai_brain.update_from_orderbook({
+                    "best_bid": best_bid,
+                    "best_ask": best_ask,
+                    "bid_volume": bid_vol_sum,
+                    "ask_volume": ask_vol_sum,
+                    "levels_data": {
+                        "bids": {str(b.price): b.size for b in ob.bids[:10]},
+                        "asks": {str(a.price): a.size for a in ob.asks[:10]},
+                    }
+                })
+                mid = (best_bid + best_ask) / 2.0 if best_bid and best_ask else None
+                mid_str = f"{mid:.2f}" if mid else "None"
+                self.logger.info(
+                    f"🔥 AI BRAIN ← ORDERBOOK: bid={best_bid}, ask={best_ask}, mid={mid_str}, "
+                    f"bid_vol={bid_vol_sum:.2f}, ask_vol={ask_vol_sum:.2f}"
+                )
+            except Exception as e:
+                self.logger.error(f"❌ Failed to feed AI brain from orderbook: {e}", exc_info=True)
 
     # ------------------------------------------------------------------
     # Simple analytics helpers
